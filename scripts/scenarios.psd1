@@ -693,6 +693,33 @@
             Advisory = @('smoothness', 'anim_truth')
             Tier = 'full'; WanVariant = $false
         }
+        # corpse_pos: the join's corpse is shoved 250 u off; the replicator must put
+        # the ragdoll back on the host's spot (join verdict, endD <= 40 u).
+        corpse_pos = @{
+            Save = 'down1'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = 'clock_sync'
+            Gating   = @('clock_sync')
+            Advisory = @()
+            Tier = 'full'; WanVariant = $false
+        }
+        # corpse_pos_off: the same with the ragdoll move disabled - EXPECTED TO FAIL
+        # (proves corpse_pos detects the bug; not part of any tier run).
+        corpse_pos_off = @{
+            Save = 'down1'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = 'clock_sync'
+            Gating   = @('clock_sync')
+            Advisory = @()
+            DiagEnv = @{ KENSHICOOP_RAGDOLL_MOVE = '0' }
+            Tier = 'probe'; WanVariant = $false
+        }
+        # ragdoll_move_probe: host-only experiment, which engine call moves a corpse.
+        ragdoll_move_probe = @{
+            Save = 'down1'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = 'clock_sync'
+            Gating   = @('clock_sync')
+            Advisory = @()
+            Tier = 'probe'; WanVariant = $false
+        }
         death_order = @{
             Save = 'down1'; Setup = ''; Tolerance = 3.0
             PrimaryGate = 'death_order'

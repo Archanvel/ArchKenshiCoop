@@ -728,7 +728,11 @@ public:
     // hash+settle logic. Session-placed buildings translate to the wire via
     // the protocol-27 build maps (keyKind=1); the receiver resolves back in
     // ingestInv. Layered on invSync (publishInventories is the carrier).
-    void setStoreSync(bool v) { storeSync_ = v; }
+    void setStoreSync(bool v) {
+        storeSync_ = v;
+        // Leaving the host role: stop speaking for containers we censused.
+        if (!v) { censusContainers_.clear(); censusShops_.clear(); censusCorpses_.clear(); }
+    }
 
     // Shared vendor stock (protocol 60, KENSHICOOP_VENDOR_SYNC). Host: the
     // container census also takes the SHOP COUNTERS and flags their snapshots
@@ -1024,6 +1028,7 @@ private:
         bool         detached;       // I9: detached from town-AI (separateIntoMyOwnSquad) once
         bool         downApplied;     // Stage 2: body is currently held in ragdoll (host says down)
         bool         koLatched;       // a reliable EVT_KNOCKOUT pinned this body down
+        unsigned long koUpTick;       // first FRESH upright sample while koLatched (0 = none)
         bool         deathLatched;    // a reliable EVT_DEATH pinned this body down PERMANENTLY
         bool         carriedDown;     // a KO'd passenger, remembered ACROSS the drop. Leaving a
                                       //   shoulder is a physical transient: the body detaches and
@@ -1033,6 +1038,7 @@ private:
                                       //   bridges that hole - see the carried carve-out.
         bool         combatArmed;     // Stage 3c: a melee-attack order is currently issued
         unsigned long combatTick;     // when the attack order was (re-)issued (re-arm throttle)
+        unsigned long combatDisarmTick; // last disarm (re-arm cooldown keeps the backoff)
         unsigned int combatOrders;    // orders issued this combat episode (re-issue backoff)
         u32          combatTgtIdx;    // target hand (index/serial) of the last issued order,
         u32          combatTgtSer;    //   so a host-side retarget re-issues immediately
@@ -1068,6 +1074,9 @@ private:
         // Carried-body sync (protocol 18):
         unsigned long carryHealTick;  // last self-heal pickup attempt (throttle)
         unsigned long physHealTick;   // last locomotion-body restore attempt (throttle)
+        bool          physHealNpc;    // world-NPC copy just left a KO/carry: restore its controller
+        unsigned long ragMoveTick;    // last ragdoll re-placement of a down copy (throttle)
+        unsigned char ragMoveN;       // re-placements since it last converged (backoff)
         unsigned long getUpHealTick;  // last stale get-up release (throttle)
         unsigned long poseHealTick;   // last stale seat/work-pose release (throttle)
         bool          freeWillHealed; // the pre-drive MOVE_ON_FREE_WILL was ended (once)
@@ -1075,7 +1084,11 @@ private:
         unsigned long glideFastSinceMs; // source outrunning its gait since (0 = not)
         float         glideStallX, glideStallZ; // copy position anchor for the stall test
         unsigned long glideStallSinceMs;        // copy has not left the anchor since (0 = off)
-        bool          glideActive;    // in the glide regime (edge log + walk re-issue)
+        unsigned long glideLagSinceMs;          // pace-test window start (0 = off)
+        unsigned long glideLagTickMs;           // last frame the window accumulated
+        float         glideLagX, glideLagZ;     // copy position at the window start
+        float         glideLagSrc;              // ground the source covered in the window
+        bool          glideActive;   // in the glide regime (edge log + walk re-issue)
         unsigned long glideFrames;    // frames of the current glide episode
         // Devtools drive record (written by applyTargets every driven tick):
         int           dbgRegime;      // DevRegime of the branch taken
@@ -1110,6 +1123,12 @@ private:
         // building the self-heal re-finds by name near the streamed position).
         unsigned int  chainOwner[5];
         bool          haveChainOwner;
+        // The bed/cage this copy was last seen or placed in, so a lost seat is
+        // re-applied by HAND. The name search fallback only knows English
+        // building names (session 2026-11-18 (2): 43 failed re-seats on a
+        // Russian install while the copy stood beside the bed).
+        unsigned int  furnHand[5];
+        int           furnHandKind;   // 0 = none, 1 bed, 2 cage
         // Phase 6b (protocol 42): last non-owner unlock-guard re-assert attempt
         // (throttle). A caged prisoner (streamKind=2) is also shackled, but the
         // furniture kind priority hides the chained state from the occupancy
@@ -1189,23 +1208,24 @@ private:
                    taskTick(0), taskRetries(0), fixtureXlateLogged(false),
                    taskNoneTick(0), taskLapseTick(0), taskLapses(0),
                    detached(false), downApplied(false),
-                   koLatched(false), deathLatched(false), carriedDown(false),
-                   combatArmed(false), combatTick(0), combatOrders(0),
+                   koLatched(false), koUpTick(0), deathLatched(false), carriedDown(false),
+                   combatArmed(false), combatTick(0), combatDisarmTick(0), combatOrders(0),
                    combatTgtIdx(0), combatTgtSer(0),
                    combatSeenTick(0), combatSnapTick(0), combatSnapCount(0),
                    combatOverTick(0), combatLockTick(0), npcSnapTick(0),
                    goalsCleared(false),
                    trusted(false), agreeStreak(0),
-                   carryHealTick(0), physHealTick(0), getUpHealTick(0), poseHealTick(0),
+                   carryHealTick(0), physHealTick(0), physHealNpc(false), ragMoveTick(0), ragMoveN(0), getUpHealTick(0), poseHealTick(0),
                    freeWillHealed(false),
                    glideUntilMs(0), glideFastSinceMs(0), glideStallX(0), glideStallZ(0),
-                   glideStallSinceMs(0), glideActive(false), glideFrames(0),
+                   glideStallSinceMs(0), glideLagSinceMs(0), glideLagTickMs(0),
+                   glideLagX(0.0f), glideLagZ(0.0f), glideLagSrc(0.0f), glideActive(false), glideFrames(0),
                    dbgRegime(0), dbgMs(0), dbgGap(0), dbgVlen(0), dbgNx(0), dbgNy(0), dbgNz(0),
                    dbgHaveNewest(false), dbgLoggedRegime(-1),
                    carryNoSeeTick(0),
                    furnHealTick(0), furnNoSeeTick(0), furnPeerTick(0), furnPeerUpTick(0),
                    furnCageHoldTick(0),
-                   haveChainOwner(false), chainHealTick(0),
+                   haveChainOwner(false), furnHandKind(0), chainHealTick(0),
                    sneakTick(0), proneTick(0), crawlDrive(false),
                    velPeak(0.0f), moveSeenMs(0), stepDirX(0.0f), stepDirZ(0.0f),
                    haveStepDir(false), dbgStillF(0), wasMoving(false),
@@ -1216,6 +1236,7 @@ private:
                    velPeakMs(0), sqSnapMs(0), catchSpd(0.0f), driveMs(0),
                    settleSinceMs(0) {
             chainOwner[0] = chainOwner[1] = chainOwner[2] = chainOwner[3] = chainOwner[4] = 0;
+            furnHand[0] = furnHand[1] = furnHand[2] = furnHand[3] = furnHand[4] = 0;
         }
     };
 
@@ -1556,6 +1577,7 @@ private:
     // settled, re-freeze if it diverges again).
     bool                      censusFreezeAi_;
     std::map<Key, unsigned long> censusFrozen_; // join: per-key freeze-hold tick
+    std::map<Key, unsigned long> proxyOrphanMs_; // join: proxy unlisted + unstreamed since
     // Attention gate (KENSHICOOP_ATTENTION_RADIUS). Reconciliation follows
     // attention: a body no interest anchor is within attentionRadius_ of is
     // DORMANT, and neither side speaks for it - the host omits it from the
@@ -1651,6 +1673,7 @@ private:
     unsigned long            claimSendMs_;  // 1 Hz sample throttle
     unsigned long            claimAssertMs_; // periodic re-assert
     unsigned long            claimMapMs_;    // [cell] MAP dump cadence
+    unsigned long            cellMapChangeMs_; // last change of the resolved cell map (0 = never)
     enum {
         CELL_OWNER_HOST   = 0,    // NetLink gives the host id 0
         CELL_DWELL_N      = 3,    // samples at 1 Hz
@@ -1847,6 +1870,8 @@ private:
                      const TradeTable* t);
     // Set the open shop's touched lines + money to the table. false: not reachable here.
     bool applyTradeTable(GameWorld* gw, const Key& k, const char* why);
+    Key  tradeWireKey(const unsigned int th[5]) const;
+    void tradeLocalHand(const Key& k, unsigned int th[5]) const;
 
     // Phase W1 world-item state.
     // HOST: worldTrack_ maps a ground item's LOCAL engine hand (Key) to its assigned
@@ -2418,7 +2443,8 @@ private:
     // per limb - first aid on a head wound forwards too.
     struct MedRecv {
         float recvBand[12]; float sentBand[12]; unsigned long lastFwdMs; bool have;
-        MedRecv() : lastFwdMs(0), have(false) {
+        float koTimer; unsigned long koRecvMs; // owner's KO countdown + arrival (protocol 67)
+        MedRecv() : lastFwdMs(0), have(false), koTimer(-1.0f), koRecvMs(0) {
             for (int i = 0; i < 12; ++i) { recvBand[i] = -1.0f; sentBand[i] = -1.0f; }
         }
     };
@@ -2540,6 +2566,14 @@ private:
     std::map<PeerBuildKey, PeerBuild> peerBuilds_;
     PeerBuild*       findPeerBuild(const Key& wire, u32 preferPlacer);
     const PeerBuild* findPeerBuild(const Key& wire, u32 preferPlacer) const;
+    // Join only. A building the host placed BEFORE this join connected reaches
+    // the join inside the pushed save, as an ordinary save-resident object with
+    // no entry in these maps - so every placer-keyed row for it (progress,
+    // doors, machines, storage, dismantle) was dropped, and the connect-edge
+    // PLACE replay minted a second building on top of it. When a host placer
+    // key has no entry but resolves HERE as a building, map it to itself.
+    // sid / xz (optional) guard against a hand that names something else.
+    bool adoptResidentBuild(const Key& wire, const char* sid, const float* xz);
     // Reverse translation (protocol 28): local minted building hand -> the
     // placer's wire key. Lets the door sampler express a MINTED proxy's door
     // in the placer's key space, and the protocol-26 filter recognize placed
@@ -3066,6 +3100,28 @@ public:
     // crossing of bandit country into a five-fold slower run for no benefit,
     // since the squad is fleeing the fight rather than resolving it.
     void setSpeedCombatCap(bool on) { speedCombatCap_ = on; }
+    // Who sets the session's speed (Config::speedPolicy): 0 = min consensus,
+    // 1 = the last click by any player, 2 = the host. Host-side; a join only
+    // ever follows the SET it receives.
+    void setSpeedPolicy(int p) { speedPolicy_ = (p == 1 || p == 2) ? p : 0; }
+    // HOST: hold the world paused while a join that just connected is still
+    // loading in (Config::joinLoadPause). The join enters from a save baked at
+    // its connect edge, so every second the host keeps running is a second of
+    // game clock the join must then make up at 2x - a session measured on
+    // 2026-11-16 opened 0.99 game-hours apart and took four minutes to close,
+    // with the join's whole world running double speed meanwhile. notePeerLoading
+    // is the connect edge; the join's first speed REQ (sent only from a live
+    // world) is the release, with a hard ceiling so a join that never arrives
+    // cannot freeze the host.
+    void setJoinLoadPause(bool on) { speedLoadPause_ = on; }
+    void notePeerLoading(u32 id);
+    bool joinLoadPauseActive() const { return speedLoadPauseOn_; }
+    // The session is paused while THIS player's own request is not: another
+    // player is holding it. The buttons keep showing the local vote, so without
+    // a note the game just looks frozen and deaf to the pause key.
+    bool pausedByPeer() const {
+        return speedLastSet_ >= 0.0f && speedLastSet_ <= 0.01f && speedMyReq_ > 0.01f;
+    }
     // Who authors the region containing (x,z)? The claimant, or the HOST when
     // the feature is off, the cell is unclaimed, or the mapping is unavailable.
     // Never returns "nobody" - an unowned region is the case this exists to
@@ -3201,6 +3257,21 @@ private:
     // speed, and the dialogue stays up to be answered with the world running.
     bool          speedDlgOpen_;       // GUI in a dialogue at the last sample
     unsigned long speedDlgOpenMs_;     // when it last opened
+    // Speed policy (Config::speedPolicy). Under "last" the host keeps the one
+    // multiplier the most recent click chose (speedLead_, -1 = nobody has
+    // clicked yet -> fall back to min). speedMyMult_ is this client's last
+    // NON-pause request, so an unpause back to the same multiplier is told
+    // apart from a click that picks a speed. speedFollow_ (join) latches the
+    // SPEED_FOLLOW bit of the host's SET.
+    int           speedPolicy_;        // 0 min, 1 last, 2 host
+    float         speedLead_;          // host, "last": the multiplier in force
+    float         speedMyMult_;        // last non-zero request of ours (-1 = none)
+    bool          speedFollow_;        // join: host asked us to adopt the effective
+    // Join-load pause (host). speedLoading_: joins connected but not yet heard
+    // from in-world (id -> connect time).
+    bool          speedLoadPause_;     // feature enable (Config::joinLoadPause)
+    bool          speedLoadPauseOn_;   // currently holding the pause (log/banner edge)
+    std::map<u32, unsigned long> speedLoading_;
     // Protocol 56, HOST: one vote per join (keyed by ownerId; each join has its
     // own REQ seq space). speedPeerReq_/speedPeerCombat_ above are the fold over
     // this map (min request / OR combat), recomputed by refreshPeerSpeedVotes.

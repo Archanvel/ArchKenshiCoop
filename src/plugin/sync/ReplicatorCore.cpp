@@ -76,6 +76,8 @@ Replicator::Replicator()
       speedSeqOut_(1), speedSeqSeen_(0),
       speedLastSendMs_(0), speedCombatSampleMs_(0), speedCombatHoldMs_(0),
       speedDlgOpen_(false), speedDlgOpenMs_(0),
+      speedPolicy_(0), speedLead_(-1.0f), speedMyMult_(-1.0f), speedFollow_(false),
+      speedLoadPause_(false), speedLoadPauseOn_(false),
       spawnSync_(false), spawnPosLogMs_(0),
       spawnMintRadius_(0.0f), adoptRadius_(0.0f), censusAdopts_(0),
       censusScanMs_(0),
@@ -84,7 +86,7 @@ Replicator::Replicator()
       moneySync_(true), recruitSync_(true),
       squadSync_(true), tabsSeeded_(0), hostRole_(true),
       cellAuth_(false), cellCollapse_(false), collapsed_(false),
-      claimSendMs_(0), claimAssertMs_(0), claimMapMs_(0),
+      claimSendMs_(0), claimAssertMs_(0), claimMapMs_(0), cellMapChangeMs_(0),
       facSeqOut_(1), facSampleMs_(0), factionSync_(true),
       doorSeqOut_(1), doorSampleMs_(0), doorSync_(true),
       buildSeqOut_(1), buildSampleMs_(0), buildSync_(true),
@@ -191,12 +193,18 @@ void Replicator::resetSession() {
     targets_.clear();          // interp buffers + per-body drive state
     drivenChars_.clear();
     drivenSeen_.clear();       // recently-driven grace (pointers dangle after swap)
+    proxyOrphanMs_.clear();
     canonicalOf_.clear();      // capture-translation reverse map (same pointers)
     rekeyLogged_.clear();      // and the change-detector for its [rekey] line
     ownSkipLogMs_.clear();     // [drive] SKIP-OWNED throttle
     pinNpcSkipLogged_.clear(); // [recruit] NPC-SKIP once-per-hand log
     jailObs_.clear();          // jail-observe spike per-captive last sample
     proxyByKey_.clear();
+    // Old-world mints: those pointers are dead. Kept, a native body later
+    // allocated at a recycled address reads as "we minted this" and is
+    // DESTROYED by the next peer-leave / dupe-heal / rekey (destroyIfMinted) -
+    // a real townsperson or recruit deleted by address.
+    mintedBodies_.clear();
     proxyRev_.clear();         // its inverse (rebuilt every publish pass)
     lastHand_.clear();         // publishKeyFor's pointer-keyed hand memory
     suppressed_.clear();
@@ -242,6 +250,7 @@ void Replicator::resetSession() {
     claimSendMs_   = 0;
     claimAssertMs_ = 0;
     claimMapMs_    = 0;
+    cellMapChangeMs_ = 0;
     attnFlips_ = 0;
     attnWinMs_ = 0;
     // The zone verdict describes the OLD world's streaming state.
@@ -346,6 +355,9 @@ void Replicator::resetSession() {
     speedCombatHoldMs_ = 0;
     speedDlgOpen_      = false;
     speedDlgOpenMs_    = 0;
+    speedLead_         = -1.0f; // policy itself is config and survives a reload
+    speedMyMult_       = -1.0f;
+    speedFollow_       = false;
     timeSlew_         = 1.0f;
     timeSeqSeen_      = 0;
     timeLastSendMs_   = 0;
@@ -369,6 +381,12 @@ void Replicator::resetSession() {
     // per-sender row seqs) describes the old session too.
     forgetPeerChannels(OWNER_ID_ALL);
     eventSeen_.clear();
+    // Clock offsets describe the PREVIOUS peers' machines (QPC = uptime, min-
+    // tracked). Kept across a full reset, a next host with a shorter uptime -
+    // another friend, or the same one after a reboot - had every snapshot
+    // stamped minutes in the past, the interpolator released every body as
+    // stale, and all remote characters stood still until Kenshi was restarted.
+    peerClock_.clear();
     // Config gates, ownRanks_ and every OUTBOUND seq counter are deliberately
     // preserved (see the header comment).
     coop::logLine("[load] session reset: pointer caches, session maps, change gates cleared");
@@ -454,6 +472,24 @@ void Replicator::clearPeerReplicationState(GameWorld* gw, u32 leaverId) {
               wcleared, wstale);
     b[sizeof(b) - 1] = '\0';
     coop::logLine(b);
+    // NPCs this client hid because the host's census did not list them must
+    // come back when the host is gone: the world is live and this game is its
+    // own authority again. resetSession only forgets the list, which left the
+    // guards, the barkeeper and the mercs hidden and frozen after the host left
+    // (session 2026-11-18 (2), join 03:38:14-15: 41 suppressions, no restore).
+    if ((all || leaverId == 0) && gw) {
+        unsigned int restored = 0;
+        for (std::map<Key, Character*>::iterator si = suppressed_.begin();
+             si != suppressed_.end(); ++si) {
+            if (!si->second) continue;
+            engine::restoreNpc(gw, si->second);
+            ++restored;
+        }
+        suppressed_.clear();
+        _snprintf(b, sizeof(b) - 1, "[leave] restored suppressed NPCs=%u", restored);
+        b[sizeof(b) - 1] = '\0';
+        coop::logLine(b);
+    }
     if (all) {
         // Every remote player is gone: drop every map (proxyByKey_ included)
         // back to freshly-launched state.
@@ -513,6 +549,18 @@ void Replicator::clearPeerReplicationState(GameWorld* gw, u32 leaverId) {
     // Its clock and reliable-event window: a reconnect starts both afresh.
     peerClock_.erase(leaverId);
     eventSeen_.erase(leaverId);
+    // The (owner, id) dedupe sets, for the same reason as the two above: a join
+    // that crashed and relaunched gets the same reserved id but numbers its
+    // drops / pickups / transfers / purchases from 1 again, and every id below
+    // its old high-water mark was silently ignored as "already applied".
+    {
+        std::set<std::pair<u32, u32> >* sets[4] = {
+            &appliedDrops_, &appliedPickups_, &appliedXfers_, &appliedVendorDeltas_ };
+        for (int si = 0; si < 4; ++si)
+            sets[si]->erase(
+                sets[si]->lower_bound(std::make_pair(leaverId, (u32)0)),
+                sets[si]->upper_bound(std::make_pair(leaverId, (u32)0xFFFFFFFFu)));
+    }
     forgetPeerChannels(leaverId);
     _snprintf(b, sizeof(b) - 1,
               "[leave] owner=%u targets=%u pins=%u claims=%u (others kept)",

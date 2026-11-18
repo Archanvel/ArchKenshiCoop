@@ -86,6 +86,11 @@ static int coopInvOwnerClass(const unsigned int h[5]) {
 
 // Protocol 60 restock gate trampoline (same reason: the engine layer must not
 // know about the Replicator). Set on joins only.
+// The damage-guard detour installed (set in installEngineDetours). The join's
+// combat-hit report rides on that detour, and startNetworking re-latches it per
+// role, so it needs to know the hook is really there.
+static bool g_dmgHookOk = false;
+
 static bool vendorRefreshGate(unsigned int platContainer, unsigned int platSerial) {
     return g_repl.vendorRefreshGated(platContainer, platSerial);
 }
@@ -305,7 +310,21 @@ void warnIfNoPortraits(const std::string& name) {
 // within a running game), so despawn our minted NPC + world-item proxies before
 // clearing the maps - else a reconnect leaves orphaned duplicates or bakes them
 // into the next save. Falls back to a plain map reset if no world has ticked yet.
+// Join: the last LOAD_NACK sent, kept so a transfer that stalls or fails its
+// commit can be asked for again (the host streams once per NACK and nothing
+// else ever retried - the join sat on "loading" until the player gave up).
+coop::LoadNackPacket g_loadNack;
+DWORD                g_loadNackTick  = 0;   // last NACK / last receive progress
+unsigned int         g_loadNackTries = 0;
+unsigned __int64     g_loadNackBytes = 0;
+const DWORD          LOAD_NACK_RETRY_MS  = 45000;
+const unsigned int   LOAD_NACK_MAX_TRIES = 4;
+// Host: joins whose connect push waits for a transfer already in flight.
+coop::u32            g_bootstrapDeferMask = 0;
+
 void sessionResetForUi() {
+    g_bootstrapDeferMask = 0;
+    g_loadNackTries = 0;
     g_session.peers.clear();
     g_session.goIdFor.clear();
     g_session.goNameFor.clear();
@@ -313,6 +332,19 @@ void sessionResetForUi() {
     g_session.bootstrapMask = 0;
     g_session.loadXferMask  = 0;
     g_peerPresent = false;
+    // A UI teardown never produces a leave event (g_net.stop() is silent), so
+    // what the leave path undoes has to be undone here too:
+    //  * the join-only save suppression. Left on, a player who pressed
+    //    Disconnect and kept playing solo had every manual, quick and autosave
+    //    silently skipped - and if they then hosted, the world they pushed to
+    //    the join could not be baked either. The next join connect edge re-arms it.
+    //  * the LOAD_GO id high-water mark, which is per HOST PROCESS. Kept, the
+    //    next host's first GO (id=1 again) was dropped as stale and the join
+    //    never loaded the pushed world.
+    coop::engine::setSaveSuppress(false);
+    g_loadIdSeen = 0;
+    g_loadAfterCommit.clear();
+    g_hostFresh = false;
     if (g_lastGw) g_repl.clearPeerReplicationState(g_lastGw, coop::OWNER_ID_ALL);
     else          g_repl.resetSession();
     g_inbound.flushWorldState();
@@ -345,6 +377,15 @@ void armConnectPush(coop::u32 targetMask) {
         coopLog("[boot] join connected during a bake - joining the same push");
         return;
     }
+    // Never re-bake while a save folder is being (or about to be) streamed to
+    // another join: the bake rewrites the very files the transfer is reading,
+    // and that join then commits a torn save or never gets its DONE. The push
+    // starts as soon as the transfer is finished (driveLoadSync).
+    if (coop::savexfer::sending() || !g_loadXferPending.empty()) {
+        g_bootstrapDeferMask |= targetMask;
+        coopLog("[boot] connect-push deferred: a save transfer is in flight");
+        return;
+    }
     char cur[64];
     cur[0] = '\0';
     coop::engine::saveInfo(cur, sizeof(cur), 0, 0);
@@ -357,8 +398,14 @@ void armConnectPush(coop::u32 targetMask) {
     _snprintf(b, sizeof(b) - 1,
               "[boot] baking save '%s' to push to join on connect", name.c_str());
     b[sizeof(b) - 1] = '\0'; coopLog(b);
-    if (!coop::engine::saveGameAs(name))
-        coopErr("[boot] connect-push save FAILED to issue");
+    if (!coop::engine::saveGameAs(name)) {
+        // No save edge will follow, so nothing would ever clear the latch and
+        // every later connect would "join the same push" that never comes.
+        coopErr("[boot] connect-push save FAILED to issue - push dropped (reconnect to retry)");
+        g_bootstrapArmed = false;
+        g_bootstrapName.clear();
+        g_session.bootstrapMask = 0;
+    }
 }
 
 // Bitmask of every connected join (host side).
@@ -627,6 +674,9 @@ void processNetEvents(GameWorld* gw) {
         const bool hostLink = !g_cfg.isHost && id == 0;
         g_session.peers.insert(id);
         g_peerPresent = true;
+        // Host: this join now loads the world we are about to push; hold the
+        // clock for it (no-op when the feature is off).
+        if (g_cfg.isHost) g_repl.notePeerLoading(id);
         // The join learns its player id from WELCOME: own exactly that squad tab.
         if (hostLink) {
             coop::resolveOwnRanksForPlayer(g_cfg.ownRanks, g_net.localId(), g_cfg.ownRanksFromEnv);
@@ -680,6 +730,9 @@ void processNetEvents(GameWorld* gw) {
         if (id == coop::OWNER_ID_ALL) {
             g_session.peers.clear();
             g_inbound.flushWorldState();
+            // The host is gone; the next one numbers its LOAD_GOs from 1 again.
+            g_loadIdSeen = 0;
+            g_loadAfterCommit.clear();
         } else {
             g_session.peers.erase(id);
             g_inbound.purgeOwner(id);
@@ -858,9 +911,25 @@ void driveSaveSync() {
                     g_bootstrapArmed = false;
                     g_bootstrapName.clear();
                     g_savePending.clear();
-                } else if (g_peerPresent)
-                    coop::savexfer::beginSend(g_net, g_net.localId(), g_savePending, joinMask());
-                else
+                } else if (g_peerPresent) {
+                    // The sender is single and global: beginSend silently resets
+                    // a transfer already in flight. A save that settled while a
+                    // join was still streaming the world it is LOADING killed
+                    // that stream, and the join then waited for a commit that
+                    // never came ("Preparing host world..." until restart). The
+                    // in-flight one wins; this save is fetched by the join's own
+                    // NACK if it is ever loaded.
+                    if (coop::savexfer::sending()) {
+                        char sb[176];
+                        _snprintf(sb, sizeof(sb) - 1,
+                                  "[save] '%s' not streamed: a transfer is in flight "
+                                  "(the join fetches it on load)", g_savePending.c_str());
+                        sb[sizeof(sb) - 1] = '\0'; coopLog(sb);
+                    } else {
+                        coop::savexfer::beginSend(g_net, g_net.localId(), g_savePending,
+                                                  joinMask());
+                    }
+                } else
                     coopLog("[save] no peer connected; transfer skipped");
             }
         }
@@ -917,6 +986,18 @@ void driveLoadSync(GameWorld* gw) {
             // A load supersedes any in-flight save coordination.
             coop::savexfer::abortAll();
             g_savePending.clear();
+            // The GO below goes to every join, so it replaces a connect bake or
+            // a queued transfer of the old world. Left set, the bake latch
+            // (cleared only on its own save edge, which abortAll just disarmed)
+            // swallowed every later connect push.
+            if (g_bootstrapArmed)
+                coopLog("[boot] connect bake superseded by a host load (its GO covers the join)");
+            g_bootstrapArmed = false;
+            g_bootstrapName.clear();
+            g_session.bootstrapMask = 0;
+            g_bootstrapDeferMask = 0;
+            g_loadXferPending.clear();
+            g_session.loadXferMask = 0;
             coop::LoadGoPacket go;
             memset(&go, 0, sizeof(go));
             go.type        = (coop::u8)coop::PKT_LOAD_GO;
@@ -1030,6 +1111,14 @@ void driveLoadSync(GameWorld* gw) {
                 b[sizeof(b) - 1] = '\0'; coopErr(b);
                 continue;
             }
+            // A repeated NACK (the join's stall retry) for a save that is
+            // streaming to that join right now: let the transfer finish.
+            if (coop::savexfer::sending() &&
+                (coop::savexfer::sendMask() & coop::peerBit(it->pkt.ownerId)) &&
+                _stricmp(coop::savexfer::sendName().c_str(), goName.c_str()) == 0) {
+                coopLog("[load] NACK ignored: that save is already streaming to this join");
+                continue;
+            }
             _snprintf(b, sizeof(b) - 1,
                       "[load] NACK id=%u name='%s' joinFp=%08x -> transfer after reload",
                       it->pkt.loadId, name, it->pkt.fingerprint);
@@ -1044,10 +1133,21 @@ void driveLoadSync(GameWorld* gw) {
                       "[load] starting fallback transfer name='%s'",
                       g_loadXferPending.c_str());
             b[sizeof(b) - 1] = '\0'; coopLog(b);
-            coop::savexfer::beginSend(g_net, g_net.localId(), g_loadXferPending,
-                                      g_session.loadXferMask ? g_session.loadXferMask : joinMask());
+            if (!coop::savexfer::beginSend(g_net, g_net.localId(), g_loadXferPending,
+                                      g_session.loadXferMask ? g_session.loadXferMask : joinMask()))
+                coopErr("[load] fallback transfer could not start (the join will ask again)");
             g_loadXferPending.clear();
             g_session.loadXferMask = 0;
+        }
+        // A connect push held back by a transfer: start it once that is done.
+        if (g_bootstrapDeferMask && !g_bootstrapArmed && g_gameStarted &&
+            !coop::savexfer::sending() && g_loadXferPending.empty()) {
+            const coop::u32 m = g_bootstrapDeferMask & joinMask();
+            g_bootstrapDeferMask = 0;
+            if (m && g_cfg.saveSync) {
+                coopLog("[boot] deferred connect-push starting");
+                armConnectPush(m);
+            }
         }
         // The chunk pump normally lives in driveSaveSync; keep the fallback
         // transfer moving even when saveSync is gated off.
@@ -1128,6 +1228,10 @@ void driveLoadSync(GameWorld* gw) {
                 g_net.queueLoadNack(nk);
                 g_loadAfterCommit = name;
                 g_loadCommitBase  = coop::savexfer::commitSeq();
+                g_loadNack      = nk;
+                g_loadNackTick  = GetTickCount();
+                g_loadNackTries = 0;
+                g_loadNackBytes = 0;
             }
         }
 
@@ -1138,6 +1242,7 @@ void driveLoadSync(GameWorld* gw) {
             pumpSaveReceive();
 
         // Pending latch: load once the transfer for OUR save committed.
+        bool retryNow = false;
         if (!g_loadAfterCommit.empty() &&
             coop::savexfer::commitSeq() > g_loadCommitBase) {
             if (coop::savexfer::lastCommitResult() == 1 &&
@@ -1156,6 +1261,44 @@ void driveLoadSync(GameWorld* gw) {
             } else {
                 // Some other/failed commit landed; re-base and keep waiting.
                 g_loadCommitBase = coop::savexfer::commitSeq();
+                // ...unless it was OUR transfer that failed its verify/commit:
+                // the host will not send it again unasked.
+                if (_stricmp(coop::savexfer::lastCommitName().c_str(),
+                             g_loadAfterCommit.c_str()) == 0)
+                    retryNow = true;
+            }
+        }
+        // Still waiting: a transfer that failed, or that has made no receive
+        // progress for LOAD_NACK_RETRY_MS (aborted by the host, dropped, never
+        // started), is asked for again with the same NACK - a bounded number
+        // of times, so a host that cannot serve it does not get spammed.
+        if (!g_loadAfterCommit.empty()) {
+            const DWORD nowMs = GetTickCount();
+            const unsigned __int64 got =
+                coop::savexfer::receiving() ? coop::savexfer::recvBytes() : 0;
+            if (got != g_loadNackBytes) {
+                g_loadNackBytes = got;
+                if (got) g_loadNackTick = nowMs;
+            }
+            if (retryNow || nowMs - g_loadNackTick >= LOAD_NACK_RETRY_MS) {
+                char rb[192];
+                if (g_loadNackTries < LOAD_NACK_MAX_TRIES) {
+                    ++g_loadNackTries;
+                    g_loadNackTick = nowMs;
+                    g_net.queueLoadNack(g_loadNack);
+                    _snprintf(rb, sizeof(rb) - 1,
+                              "[load] transfer of '%s' %s - asking the host again (id=%u, try %u/%u)",
+                              g_loadAfterCommit.c_str(), retryNow ? "FAILED" : "stalled",
+                              g_loadNack.loadId, g_loadNackTries, LOAD_NACK_MAX_TRIES);
+                    rb[sizeof(rb) - 1] = '\0'; coopErr(rb);
+                } else if (g_loadNackTries == LOAD_NACK_MAX_TRIES) {
+                    ++g_loadNackTries;
+                    _snprintf(rb, sizeof(rb) - 1,
+                              "[load] transfer of '%s' never completed after %u retries - "
+                              "giving up (reconnect to retry)",
+                              g_loadAfterCommit.c_str(), LOAD_NACK_MAX_TRIES);
+                    rb[sizeof(rb) - 1] = '\0'; coopErr(rb);
+                }
             }
         }
     }
@@ -1468,8 +1611,22 @@ void coopPanelDrive(bool atTitle) {
     // shows it again for debugging. Session status stays in the lobby + F2 panel.
     static int s_banner = -1;
     if (s_banner < 0) { const char* e = getenv("KENSHICOOP_BANNER"); s_banner = (e && e[0] == '1') ? 1 : 0; }
+    // The one state the banner is always shown for: the host's world is being
+    // held paused for a friend who is still loading. Without it the host sees
+    // a game that refuses to unpause and no reason why.
+    const bool loadHold = g_cfg.isHost && g_repl.joinLoadPauseActive();
+    const bool peerHold = !loadHold && g_peerPresent && g_gameStarted &&
+                          g_repl.pausedByPeer();
+    if (loadHold) {
+        detail = "Paused - a friend is loading into the game...";
+        ostate = 1;
+    } else if (peerHold) {
+        detail = "Paused by another player";
+        ostate = 1;
+    }
     coop::engine::coopOverlayTick(detail.c_str(), ostate,
-                                  s_banner == 1 && (g_net.isRunning() || lobbyHosting));
+                                  loadHold || peerHold ||
+                                  (s_banner == 1 && (g_net.isRunning() || lobbyHosting)));
     if (atTitle) lobbyDrive(s_friends, transfer);
     else         coop::engine::lobbyTestTick();
 }
@@ -2304,7 +2461,10 @@ void tickReplicateApply(GameWorld* gw, bool worldLive) {
         // authors the cells it stands in and judges its local copies of the
         // other's. With cellAuth off the two conditions collapse to today's
         // exclusive split, which is what makes the fail-open A/B meaningful.
-        if (!g_cfg.isHost || g_cfg.cellAuth) {
+        // Only while the authority is actually connected: with the host gone
+        // the join kept culling every NPC the (silent) census no longer listed
+        // (session 2026-11-18 (2): 41 town NPCs hidden after the host left).
+        if ((!g_cfg.isHost || g_cfg.cellAuth) && g_peerPresent) {
             g_repl.applyNpcCensus(gw, g_inbound);
             g_repl.enforceHostAuthority(gw, g_net.localId());
         }
@@ -2521,6 +2681,17 @@ void mainLoop_hook(GameWorld* gw, float dt) {
             coopLog("[speed] intent hooks installed (setGameSpeed/userPause/togglePause)");
         else
             coopLog("[speed] FAILED to install intent hooks (vote capture degraded)");
+        // Healing-rate multiplier (coop_config.json "healMult"). The detour is
+        // installed only when the value is not vanilla, so a default install
+        // carries no extra hook on the medical path at all.
+        if (g_cfg.healMult > 1.001f || g_cfg.healMult < 0.999f) {
+            char hb[112];
+            bool hok = coop::engine::installHealHook();
+            _snprintf(hb, sizeof(hb) - 1,
+                      "[heal] rate hook %s (healMult=%.2f, player squads only)",
+                      hok ? "installed" : "FAILED to install", g_cfg.healMult);
+            hb[sizeof(hb) - 1] = '\0'; coopLog(hb);
+        }
         // "Multiplayer+ (Wanderer x2)" start: give both wanderers the stat line the start
         // promises. Raise-only, so it is a FLOOR at 50 - it re-runs on every load
         // of such a world and is a no-op once the characters have trained past it.
@@ -2829,6 +3000,10 @@ void startNetworking() {
     // ENet protocol unchanged. Requires the partner's steamid64; falls back to
     // UDP loudly when Steam is unavailable so a misconfigured session still
     // behaves like the stock build instead of silently doing nothing.
+    // The transport is chosen per connect. Clear the previous session's Steam
+    // peer first, or a later UDP / LAN connect (and a Steam attempt that falls
+    // back to UDP below) still tunnels ENet through Steam and never connects.
+    g_net.setSteamTransport(0);
     if (g_cfg.transport == "steam") {
         if (g_cfg.steamPeer == 0) {
             coopErr("[steam] KENSHICOOP_TRANSPORT=steam requires KENSHICOOP_STEAM_PEER=<partner steamid64>; falling back to UDP");
@@ -2858,6 +3033,39 @@ void startNetworking() {
     // host already does (see engine::setMachineWorkMirror). Set here, not at
     // configure time, because the in-game panel picks the role at connect.
     coop::engine::setMachineWorkMirror(g_cfg.prodSync && !g_cfg.isHost);
+    // The rest of the role-dependent switches, for the same reason. They were
+    // latched once in installEngineDetours(), where every player who picks a
+    // role in the lobby / F2 panel is still the DEFAULT HOST - so a real
+    // joining player (unlike a harness join, which is a join from its env)
+    // kept the host's settings for the whole session:
+    //   * reportCombat OFF  - its squad's melee on the host's NPCs was guarded
+    //     locally and never reported, so the host's enemies took no damage
+    //     from it;
+    //   * gateAuthority OFF - the join-side trust gate never ran;
+    //   * storeSync ON      - it census-authored every chest and shop counter
+    //     near it, and the host applied those snapshots over its own
+    //     (2026-11-16 host log: [inv] APPLY for containers the host never
+    //     sent, and the join-only "[vendor] defer-expired" path firing on the
+    //     host);
+    //   * restock gate unset - its merchants restocked on their own.
+    {
+        const bool join = !g_cfg.isHost;
+        g_repl.setGateAuthority(join && g_cfg.gateAuthority);
+        const bool report = join && g_dmgHookOk;
+        g_repl.setReportCombat(report);
+        if (!report) coop::engine::setCombatReport(false);
+        g_repl.setStoreSync(g_cfg.storeSync && !join);
+        if (g_cfg.vendorSync)
+            coop::engine::setVendorRefreshGate(join ? &vendorRefreshGate : 0);
+        char rb[160];
+        _snprintf(rb, sizeof(rb) - 1,
+                  "[role] latched %s: gateAuthority=%d reportCombat=%d storeSync=%d restockGate=%d",
+                  join ? "JOIN" : "HOST", (join && g_cfg.gateAuthority) ? 1 : 0,
+                  report ? 1 : 0, (g_cfg.storeSync && !join) ? 1 : 0,
+                  (g_cfg.vendorSync && join) ? 1 : 0);
+        rb[sizeof(rb) - 1] = '\0';
+        coopLog(rb);
+    }
 
     bool ok;
     if (g_cfg.isHost) {
@@ -2888,7 +3096,7 @@ void coopUiConnect(bool isHost, bool useSteam, unsigned long long peerId) {
     // Re-read the UDP endpoint (ip/port) from coop_config.json so editing it then
     // hitting Connect works without restarting the game. (It also picks up a
     // steamPeer if one is set for advanced/back-compat use.)
-    coop::reloadPeerFromFile(g_cfg);
+    if (g_cfg.testLobbyRole == 0) coop::reloadPeerFromFile(g_cfg); // harness: keep the env endpoint
     // A Steam ID pasted in the F2 panel this session wins over the config: the
     // normal flow is Copy my Steam ID -> friend Pastes it -> Connect, with no file
     // editing. peerId is 0 when nothing was pasted, so the config value stands.
@@ -2933,6 +3141,13 @@ void coopUiDisconnect() {
     // clearing maps so nothing lingers as a duplicate or gets baked into a save.
     sessionResetForUi();
     coop::engine::setMachineWorkMirror(false); // solo again: every machine works locally
+    // ...and the other join-only switches startNetworking latched: solo, this
+    // game is its own authority again (merchants restock, no trust gate, no
+    // combat-hit reporting to a host that is gone).
+    g_repl.setGateAuthority(false);
+    g_repl.setReportCombat(false);
+    coop::engine::setCombatReport(false);
+    coop::engine::setVendorRefreshGate(0);
     applyHostRanks(); // solo again: the host controls every squad
 }
 
@@ -3051,6 +3266,9 @@ void configureReplicator() {
         g_repl.setCellAuth(g_cfg.cellAuth);
         g_repl.setCellCollapse(g_cfg.cellCollapse);
         g_repl.setSpeedCombatCap(g_cfg.speedCombatCap);
+        g_repl.setSpeedPolicy(g_cfg.speedPolicy);
+        g_repl.setJoinLoadPause(g_cfg.joinLoadPause);
+        coop::engine::setHealMult(g_cfg.healMult);
         g_repl.setStarveHold(g_cfg.starveHoldMs);
         // Camera-anchored interest (protocol 43): engine-side master enable
         // for the camera anchors in interestCenters.
@@ -3193,6 +3411,7 @@ void installEngineDetours() {
     if (g_cfg.damageGuard) {
         if (coop::engine::installDamageGuardHook()) {
             g_repl.setDamageGuard(true);
+            g_dmgHookOk = true;
             // Join-dealt authoritative damage report (protocol 45): only the JOIN
             // reports (the HOST owns + simulates world NPCs, so its own swings land
             // natively). Enabling report mode on the join makes the guard accumulate
@@ -3520,7 +3739,10 @@ __declspec(dllexport) void startPlugin() {
             coop::steaminvite::init(&coopUiConnect);
     }
 
-    if (autoStart) {
+    if (autoStart && g_cfg.testLobbyRole != 0) {
+        coopLog("KenshiCoop: KENSHICOOP_TEST_LOBBY - role applied through the panel connect path");
+        coopUiConnect(g_cfg.testLobbyRole == 1, false, 0);
+    } else if (autoStart) {
         startNetworking();
     } else {
         coopLog("KenshiCoop: session DEFERRED - press F2 to host (Steam invite) or join a "

@@ -172,6 +172,15 @@ bool steerTo(Character* c, float x, float y, float z, float speed);
 
 // SEH-guarded: halt + teleport to an exact transform (a clean stop at rest).
 bool park(Character* c, float x, float y, float z, float heading);
+// Move a ragdolled body (corpse / KO'd) to an absolute spot - the only call that
+// actually moves the physics ragdoll. False (no-op) when the body is not ragdolled.
+bool moveRagdollBody(Character* c, float x, float y, float z);
+bool ragdollMoveEnabled(); // KENSHICOOP_RAGDOLL_MOVE (default on)
+// Probe: move a (ragdolled) body by candidate method 1..6 (see EngineEntity.cpp).
+bool probeMoveBody(Character* c, int method, float tx, float ty, float tz);
+bool probeMoveBodyStep(Character* c, int method, int step, float tx, float ty, float tz);
+// Physics ragdoll root position (where a corpse visibly lies).
+bool readRagdollRoot(Character* c, float out[3]);
 // Halt an in-flight movement goal without teleporting (census-freeze upkeep:
 // the AI-suspend hook blocks new decisions, not a committed destination).
 bool haltMovement(Character* c);
@@ -401,7 +410,9 @@ bool  markerCaptionIs(void* label, const char* text);
 bool knockDown(Character* c, bool on);
 // Maintain an already-down body each tick by topping the KO timer (no re-collapse).
 // Prevents the get-up/flop flicker without re-triggering the ragdoll fall. Join-side.
-bool holdDown(Character* c);
+// 'seconds' is the KO timer to keep (the game shows it as the countdown); the
+// owner's real remaining time when known, else the historical 8 s.
+bool holdDown(Character* c, float seconds = 8.0f);
 
 // ---- Protocol 21: runtime-spawn proxy replication ---------------------------
 // NPC sync resolves bodies by save-stable hand, so a squad the host's spawn
@@ -1489,6 +1500,8 @@ struct MedicalRead {
     float fed;    // MedicalSystem::fed (-1 = unread/not carried)
     float dazed;  // MedicalSystem::dazedOrAlert (DIAGNOSTICS ONLY - never
                   // written; drunk/drug-evidence field for the deferred half)
+    // ---- protocol 67: KO countdown ----
+    float koTimer; // MedicalSystem::knockoutTimer (seconds left; -1 = unread)
 };
 // SEH-guarded read of c's medical model into *out. Returns out->valid.
 bool readMedical(Character* c, MedicalRead* out);
@@ -1799,7 +1812,7 @@ bool reviveSubject(GameWorld* gw, const unsigned int subjHand[5]);
 // medical.dead + unconcious, releases the ragdoll, and floors blood so the
 // body cannot immediately re-die. Death only takes hold on the peer via the
 // owner's reliable EVT_DEATH. Returns true if it actually vetoed a local death.
-bool vetoLocalDeath(Character* c);
+bool vetoLocalDeath(Character* c, bool keepDown = false);
 
 // player_combat victim pick: the UPRIGHT non-squad world NPC nearest the body at
 // refHand (excluding, optionally, up to two prior hands - pass 0 for none; the
@@ -2546,6 +2559,20 @@ bool inDialogue();
 // the save's starting speed. Call once, from the main thread, after gameplay
 // is live. Returns false when any target fails to resolve or hook.
 bool installSpeedIntentHooks(GameWorld* gw);
+
+// Speed policy "last"/"host": make 'mult' this player's remembered request
+// (the multiplier the intent model restores on unpause), because the session's
+// speed was just set by another player. No engine write, no UI write.
+void adoptSpeedVote(float mult);
+
+// Healing-rate multiplier for player-squad bodies (Config::healMult). The
+// setter is a plain store and may be called any time; the hook scales the two
+// heal factors of MedicalSystem::HealthPartStatus::update and is a pass-through
+// while the multiplier is 1. installHealHook is idempotent; call it from the
+// main thread once gameplay is live. Returns false when the target does not
+// resolve or the detour fails.
+void setHealMult(float mult);
+bool installHealHook();
 
 // Spike probe (KENSHICOOP_SPEED_PROBE=1): read the MainBar speed-button
 // selected states into out (one char per button, '0'/'1', NUL-terminated;

@@ -612,6 +612,7 @@ extern GetAttackTargetFn g_getAttackTargetFn;
 extern InCombatModeFn    g_inCombatModeFn;
 extern GetCombatClassFn  g_getCombatClassFn;
 extern CharBodyBoolFn    g_inRangedModeFn;
+extern CharBodyBoolFn    g_useRangedFn;
 extern CharBodyBoolFn    g_underMeleeFn;
 extern CharBodyBoolFn    g_fleeingFn;
 

@@ -1,4 +1,48 @@
-# KenshiCoop
+# Arch Kenshi Coop
+
+A bug-fix fork of [Savas07/KenshiCoop](https://github.com/Savas07/KenshiCoop)
+v0.59.1, which itself continues [nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop).
+All credit for the mod goes to its original authors; this fork adds fixes found
+while playing two-player sessions, each one checked on the two-client test
+harness. Version string: `0.59.1-fixN`. **Wire protocol 67** - not compatible
+with v0.59.1 (66), so every player needs the same build.
+
+Форк с исправлениями поверх Savas07/KenshiCoop v0.59.1. У всех игроков должна
+стоять одна и та же сборка.
+
+### Changes since v0.59.1 (fix1 - fix10)
+
+- **Host crash** when a peer picked up the copy of an item the host had sold to
+  a trader: a sale is no longer treated as a ground drop, and the item pointer
+  is re-validated before use.
+- **Role set-up for players joining from the menu / F2 panel.** The plugin
+  started every game as host and did not fully switch roles on connect, so a
+  joined player's hits did no damage on the host, their containers and shop
+  stock overwrote the host's, and traders restocked on both sides. Roles are
+  now re-applied on connect and reset on disconnect.
+- **Stuck world transfer:** a join whose save download failed waited in the
+  menu forever; it now re-requests, and the host does not re-save mid-transfer.
+- **Unconscious timer:** a knocked-out copy showed a frozen "8 s"; it now shows
+  and counts down the owner's real timer (protocol 67). Carried or bedded
+  bodies no longer wake early.
+- **Beds:** a copy that got up next to the bed it lay in is put back into that
+  exact bed (beds were matched by English names, which fails on localised games).
+- **Trader money** growing by itself (one shop's cash was counted twice; NPC
+  copies "bought" goods on the join).
+- **Corpses lying in different places** for host and join: ragdolled bodies
+  are now actually moved (kill ragdoll, teleport, re-ragdoll in one frame).
+- **Crawling NPC flickering** knocked out / revived on the join.
+- Desync fixes: negative limb health, healing rolled back during bandaging,
+  stuck knock-out state, NPCs vanishing for 20-30 s, guards hidden after the
+  host leaves, frozen copy of a carried NPC that woke up, attack-order spam in
+  crowds, combat rubber-banding, bodies dropping out of mid-range sync, zone
+  hand-over grace period, stale records after a rejoin, stuck speech bubbles.
+- **New options** in `coop_config.json`: `speedPolicy`, `speedCombatCap`,
+  `healMult` (see below); the world pauses while a friend is loading in.
+
+Upstream README follows.
+
+---
 
 Setup + Demo: [https://www.youtube.com/watch?v=OqwVRRZEYGM](https://www.youtube.com/watch?v=OqwVRRZEYGM)
 
@@ -157,6 +201,23 @@ re-read whenever you go ONLINE, so no restart is needed after an edit.
   character editor right after loading in (about 8 s after their world appears;
   the game stays paused for everyone until they confirm). Loading an existing
   save never opens the editor - established characters are never re-rolled.
+- **Game speed and healing rate are yours to tune.** Three optional keys in
+  `<Kenshi>\mods\KenshiCoop\coop_config.json` (read when Kenshi starts):
+  - `"speedPolicy"` - who sets the speed. `"min"` (default) is the consensus
+    rule: the world runs at the slowest speed any player has selected, so
+    everyone has to click fast-forward. `"last"` makes the most recent click by
+    any player the speed for everybody. `"host"` gives the buttons to the host.
+    Only the **host's** value matters. Pausing is the same in all three: anyone
+    can pause, and the world resumes when nobody is holding a pause.
+  - `"speedCombatCap"` - `true` (default) pins the world to 1x while any
+    player squad is fighting; `false` lets you fast-forward through it.
+  - `"healMult"` - how fast player-squad characters heal, `1` = vanilla, e.g.
+    `3` for three times faster (0.1 - 20). It changes healing only - bleeding,
+    hunger and the clock are untouched. Each machine applies its own value to
+    the squads it simulates, so all players should use the same number.
+
+  On a join's screen the speed buttons keep showing that player's own last
+  click, which under `"last"` / `"host"` may not be the speed in force.
 
 ### If something goes wrong
 

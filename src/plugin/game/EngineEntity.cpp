@@ -13,6 +13,7 @@
 // the API consumed by the PowerShell oracles (see resources/CODE_MAP.md).
 
 #include "EngineInternal.h"
+#include <kenshi/Dialogue.h> // DialogueSpeechBubble::setAlpha (suppressNpc bubble fade)
 
 // The co-op session panel + status overlay (the DatapanelGUI/Win32/clipboard
 // surface) moved to EngineUi.cpp in Phase 5e, taking its <kenshi/gui/...>,
@@ -531,6 +532,125 @@ bool park(Character* c, float x, float y, float z, float heading) {
     }
 }
 
+// Move a RAGDOLLED body (corpse, KO'd body) to an absolute spot. Neither the
+// movement-controller teleport (park/applyRaw) nor Character::teleport alone moves
+// the physics ragdoll, which is what the player sees and loots; ragdoll_move_probe
+// (runs 20261118_124306/124844/130014) measured every candidate. This is the one
+// that worked on dead AND KO-held bodies, 3 of 3, and stayed put: destroy the
+// ragdoll NOW, teleport the character, and queue a fresh ragdoll, which the engine
+// builds at the new transform. All in one frame, so no frame shows a standing body.
+// Returns false (doing nothing) for a body that is not in ragdoll.
+// Replicator-side switch (KENSHICOOP_RAGDOLL_MOVE=0 restores the old, inert
+// correction; corpse_pos_off uses it to prove the scenario catches the bug).
+bool ragdollMoveEnabled() {
+    static int s_on = -1;
+    if (s_on < 0) {
+        const char* e = getenv("KENSHICOOP_RAGDOLL_MOVE");
+        s_on = (e && e[0] == '0') ? 0 : 1;
+    }
+    return s_on == 1;
+}
+
+bool moveRagdollBody(Character* c, float x, float y, float z) {
+    if (!c || !g_isRagdollFn || !g_ragdollModeFn) return false;
+    __try {
+        if (!g_isRagdollFn(c)) return false;
+        Ogre::Vector3 to(x, y + 10.0f, z); // a little above: settle onto the ground
+        c->_killRagdoll(true);
+        c->teleport(to);
+        g_ragdollModeFn(c, true, RagdollPart::WHOLE);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Ragdoll-move probe (corpse divergence, 2026-11-18): park() writes the movement
+// controller's transform, which a ragdolled body (dead, or KO-held on the join)
+// ignores - its pose belongs to the physics ragdoll, so every corpse park was
+// FUTILE. Each method is one candidate engine entry point; the probe scenario
+// applies one per body and logs which actually moved it.
+bool probeMoveBody(Character* c, int method, float tx, float ty, float tz) {
+    if (!c) return false;
+    __try {
+        Ogre::Vector3 to(tx, ty, tz);
+        Ogre::Vector3 cur = c->getPosition();
+        Ogre::Quaternion rot = c->getOrientation();
+        CharMovement* mv = c->movement;
+        switch (method) {
+        case 1: if (!mv) return false; mv->_setPositionDirectionAndTeleport(to, rot); return true;
+        case 2: c->teleport(to); return true;
+        case 3: c->teleport(to, rot); return true;
+        case 4: c->relocationTeleport(to - cur); return true;
+        case 5: c->teleportVisuallyOnly(to, rot); return true;
+        case 6:
+            if (g_ragdollModeFn) g_ragdollModeFn(c, false, RagdollPart::WHOLE);
+            if (mv) mv->_setPositionDirectionAndTeleport(to, rot);
+            if (g_ragdollModeFn) g_ragdollModeFn(c, true, RagdollPart::WHOLE);
+            return true;
+        default: return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Multi-frame candidates (ragdoll messages are queued, so an off/move/on in one
+// frame nets to nothing). step = 0, 1, 2 at ~500 ms apart.
+bool probeMoveBodyStep(Character* c, int method, int step, float tx, float ty, float tz) {
+    if (!c) return false;
+    __try {
+        Ogre::Vector3 to(tx, ty, tz);
+        switch (method) {
+        case 7: // ragdoll off -> teleport -> ragdoll on
+            if (step == 0 && g_ragdollModeFn) g_ragdollModeFn(c, false, RagdollPart::WHOLE);
+            if (step == 1) c->teleport(to);
+            if (step == 2 && g_ragdollModeFn) g_ragdollModeFn(c, true, RagdollPart::WHOLE);
+            return true;
+        case 8: // kill ragdoll -> teleport -> ragdoll on
+            if (step == 0) { c->_killRagdoll(true); c->teleport(to); }
+            if (step == 1 && g_ragdollModeFn) g_ragdollModeFn(c, true, RagdollPart::WHOLE);
+            return true;
+        case 9: // teleport -> kill ragdoll -> ragdoll on
+            if (step == 0) { c->teleport(to); c->_killRagdoll(true); }
+            if (step == 1 && g_ragdollModeFn) g_ragdollModeFn(c, true, RagdollPart::WHOLE);
+            return true;
+        case 10: // teleport -> carry mode off making a fresh ragdoll
+            if (step == 0) { c->teleport(to); c->carryModeT(false, true, false); }
+            return true;
+        case 11: // teleport -> re-assert ragdoll on
+            if (step == 0) c->teleport(to);
+            if (step == 1 && g_ragdollModeFn) g_ragdollModeFn(c, true, RagdollPart::WHOLE);
+            return true;
+        case 13: // method 8 in ONE frame (kill is immediate, ragdoll-on is queued)
+            if (step == 0) {
+                c->_killRagdoll(true); c->teleport(to);
+                if (g_ragdollModeFn) g_ragdollModeFn(c, true, RagdollPart::WHOLE);
+            }
+            return true;
+        case 12: // carry on (attach, no ragdoll) -> teleport -> carry off with ragdoll
+            if (step == 0) c->carryModeT(true, false, false);
+            if (step == 1) c->teleport(to);
+            if (step == 2) c->carryModeT(false, true, false);
+            return true;
+        default: return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool readRagdollRoot(Character* c, float out[3]) {
+    if (!c || !out) return false;
+    __try {
+        Ogre::Vector3 p = c->getRagdollPhysicsRootPos();
+        out[0] = p.x; out[1] = p.y; out[2] = p.z;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 // Census-freeze support: stop an in-flight movement goal WITHOUT teleporting.
 // The AI-suspend hook only blocks new periodic decisions - a destination the
 // slave AI committed before the freeze keeps the body running (run 014948: a
@@ -958,8 +1078,38 @@ bool isLocalPlayerChar(GameWorld* gw, Character* c) {
     }
 }
 
+// A suppressed body leaves the engine's update list, and Dialogue::update - the
+// only thing that moves or fades a speech bubble - runs from Character::update.
+// So a line the NPC was speaking when it was suppressed (or spoke afterwards:
+// suppressed bodies do still start dialogue) stayed on screen at a fixed spot for
+// as long as the body stayed suppressed, with no NPC under it: the "labels get
+// stuck" report. Fade the bubble out by hand. Alpha only - nothing is destroyed,
+// and the body's own Dialogue::update takes the bubble back over on restore.
+namespace {
+typedef void (__fastcall* BubbleAlphaFn)(DialogueSpeechBubble* self, float value);
+BubbleAlphaFn g_bubbleAlphaFn    = 0;
+bool          g_bubbleAlphaTried = false;
+
+void hideSpeechBubbleSeh(Character* c) {
+    __try {
+        Dialogue* d = c->dialogue;
+        if (!d) return;
+        // Dialogue::speechBubblePanel (+0x228; private in the header).
+        DialogueSpeechBubble* p =
+            *reinterpret_cast<DialogueSpeechBubble**>(reinterpret_cast<char*>(d) + 0x228);
+        if (p) g_bubbleAlphaFn(p, 0.0f);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+} // namespace
+
 bool suppressNpc(GameWorld* gw, Character* c) {
     if (!gw || !c || !g_removeUpdateFn) return false;
+    if (!g_bubbleAlphaTried) {
+        g_bubbleAlphaTried = true;
+        g_bubbleAlphaFn = (BubbleAlphaFn)KenshiLib::GetRealAddress(
+            &DialogueSpeechBubble::setAlpha);
+    }
+    if (g_bubbleAlphaFn) hideSpeechBubbleSeh(c);
     __try {
         g_removeUpdateFn(gw, c);
         if (g_clearGoalsFn) g_clearGoalsFn(c);

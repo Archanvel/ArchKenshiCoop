@@ -43,6 +43,7 @@ public static class KenLauncher {
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
   public const int SW_HIDE = 0;
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   public const uint BM_CLICK = 0x00F5;
@@ -53,7 +54,15 @@ public static class KenLauncher {
       var c = new StringBuilder(64); GetClassName(h, c, 64);
       if (c.ToString() == "Button") {
         var t = new StringBuilder(64); GetWindowText(h, t, 64);
-        if (t.ToString() == text) { found = h; return false; }
+        // A localised launcher captions the button in its own script (the
+        // Russian one does not read Latin "OK"), so "OK" also matches the
+        // launcher's OK control by id (1003, probed on 1.0.65) and IDOK.
+        bool ok = t.ToString() == text;
+        if (!ok && text == "OK") {
+          int id = GetDlgCtrlID(h);
+          ok = id == 1003 || id == 1 || t.ToString() == "ОК";
+        }
+        if (ok) { found = h; return false; }
       }
       return true;
     }, IntPtr.Zero);

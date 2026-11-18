@@ -192,6 +192,9 @@ if ($Scenario -ne "" -and -not $PSBoundParameters.ContainsKey("Seconds")) {
     if ($null -ne $manifestEntry -and $manifestEntry.ContainsKey("Seconds")) {
         $Seconds = $manifestEntry.Seconds
     }
+    # Local headroom (ab.ps1): a slow join load delays peer-ready arming, so the
+    # backstop needs the same extra time the arm timeout was given.
+    if ($env:KENSHICOOP_AB_EXTRA_SEC) { $Seconds += [int]$env:KENSHICOOP_AB_EXTRA_SEC }
 }
 
 if ($OutDir -eq "") {

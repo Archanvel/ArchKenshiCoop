@@ -88,7 +88,7 @@ static void testSizes() {
     CHECK_EQ("sizeof(InvXferPacket)",           sizeof(InvXferPacket),           202); // v36; v51: +level
 
     CHECK_EQ("sizeof(MedPartEntry)",            sizeof(MedPartEntry),            19);
-    CHECK_EQ("sizeof(MedicalPacket)",           sizeof(MedicalPacket),           467);
+    CHECK_EQ("sizeof(MedicalPacket)",           sizeof(MedicalPacket),           471);
     CHECK_EQ("sizeof(TreatmentPacket)",         sizeof(TreatmentPacket),         77);
     CHECK_EQ("sizeof(CombatHitPacket)",         sizeof(CombatHitPacket),         37);
     CHECK_EQ("sizeof(SpeedPacket)",             sizeof(SpeedPacket),             14);
@@ -292,6 +292,20 @@ static void testSizes() {
         CHECK("low-crouch sneaker is not crawling",
               !bodyIsCrawling(bodyWithProne((u16)(BODY_SNEAK | BODY_CRAWL),
                                             PRONE_STAYING_LOW)));
+        // Session 2026-11-18: a crawler blinked 1033 -> 521 -> 1033 (PS_STAYING_LOW,
+        // DOWN|CRAWL, no ragdoll) and each blink sent a KNOCKOUT + REVIVE pair.
+        const u16 LOWBLINK = 521;
+        CHECK("measured low-blink word decodes",
+              bodyProne(LOWBLINK) == PRONE_STAYING_LOW &&
+              (LOWBLINK & (BODY_DOWN | BODY_CRAWL)) == (BODY_DOWN | BODY_CRAWL) &&
+              (LOWBLINK & BODY_RAGDOLL) == 0);
+        CHECK("low-blink crawler is crawling", bodyIsCrawling(LOWBLINK));
+        CHECK("crawl -> low-blink is no KO",
+              !(bodyDownNotCrawling(LOWBLINK) && !bodyDownNotCrawling(CRAWLING)));
+        CHECK("low-blink with ragdoll is a collapse",
+              bodyDownNotCrawling((u16)(LOWBLINK | BODY_RAGDOLL)));
+        CHECK("dead low-blink is not crawling",
+              !bodyIsCrawling((u16)(LOWBLINK | BODY_DEAD)));
     }
 
     // Protocol 53: the crippled CAUSE flag on the medical packet's flags byte.

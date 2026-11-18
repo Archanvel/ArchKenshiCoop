@@ -1185,10 +1185,11 @@ bool knockDown(Character* c, bool on) {
 // wake AI stands the body, the replicator notices (too late), and re-collapses
 // it. So instead top the force timer EVERY tick: the timer never reaches 0, the
 // wake AI never fires, and the body stays cleanly down with no re-collapse.
-bool holdDown(Character* c) {
+bool holdDown(Character* c, float seconds) {
     if (!c) return false;
+    if (!(seconds >= 0.5f)) seconds = 0.5f; // also catches NaN: never let it lapse
     __try {
-        if (g_knockoutForceFn) { g_knockoutForceFn(&c->medical, 8.0f); return true; }
+        if (g_knockoutForceFn) { g_knockoutForceFn(&c->medical, seconds); return true; }
         return false;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -1693,6 +1694,17 @@ int applyTask(Character* c, const EntityState& e) {
 bool detachFromTownAI(Character* c) {
     if (!c || !g_separateSquadFn) return false;
     __try {
+        // A trader's stock and cash live on its PLATOON (the vendor list).
+        // separateIntoMyOwnSquad moves the body into a fresh platoon that has
+        // neither, so the shop it then opens is empty (session 2026-11-18: the
+        // join's adopted trader went 1,47 -> local platoon 124 and offered 0
+        // goods, 0 cats while the host's had 25000). Report "done" so callers
+        // latch their detached flag and do not retry every tick.
+        ActivePlatoon* ap = g_getPlatoonFn ? g_getPlatoonFn(c) : 0;
+        if (ap && g_platHasVendorListFn && g_platHasVendorListFn(ap)) {
+            coop::logLine("[detach] skipped: body belongs to a vendor platoon (stock stays with it)");
+            return true;
+        }
         g_separateSquadFn(c, true);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1774,9 +1786,51 @@ int applyTaskOrder(Character* c, const EntityState& e) {
 // re-issue cleanly re-targets. breakOrder additionally flushes a committed player
 // order (seat inject) via the order-path attack - without it a seated copy ignores
 // the goal (see the helper).
+// The wire carries only "fighting target X" - not whether the owner is shooting
+// or swinging - so every copy used to get the MELEE goal and a peer's
+// crossbowman charged into the brawl while its owner stood back and fired.
+// Decide it locally instead: the copy carries the owner's gear, so the engine's
+// own "would this body shoot" test (crossbow + ammo + ranged stance) answers for
+// it, and the owner's streamed pose standing off from the target confirms the
+// owner is not in the melee. Inside RANGED_STANDOFF the melee goal stands (the
+// owner closed in, or was closed on).
+static const float RANGED_STANDOFF = 45.0f;
+
+static bool copyShouldShoot(Character* c, Character* target, const EntityState& e) {
+    if (!g_useRangedFn || !g_addGoalFn) return false;
+    __try {
+        if (!g_useRangedFn(c)) return false;
+        Ogre::Vector3 tp = static_cast<RootObject*>(target)->getPosition();
+        const float dx = tp.x - e.x, dz = tp.z - e.z;
+        return (dx * dx + dz * dz) > RANGED_STANDOFF * RANGED_STANDOFF;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool orderRangedAttack(Character* attacker, Character* target) {
+    __try {
+        if (g_clearGoalsFn) g_clearGoalsFn(attacker);
+        g_addGoalFn(attacker, (int)RANGED_ATTACK_FOCUSED_UNPROVOKED,
+                    static_cast<RootObject*>(target));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 int applyCombat(Character* c, Character* target, const EntityState& e, bool breakOrder) {
     if (!c || !coop::taskIsCombat(e.task)) return 0;
     if (!target) return 1; // opponent not loaded on this client -> caller just holds
+    if (copyShouldShoot(c, target, e)) {
+        // Once per body per episode would need caller state; the caller already
+        // logs every order, so tag the ranged ones here.
+        if (orderRangedAttack(c, target)) {
+            coop::logLine("[combat] ranged order (copy has a usable crossbow, owner stands off)");
+            return 2;
+        }
+        // fall through to the melee goal on a fault
+    }
     if (breakOrder && !orderMeleeAttackViaOrder(c, target)) return -1;
     return orderMeleeAttack(c, target) ? 2 : -1;
 }
@@ -1791,6 +1845,8 @@ int forceAttack(Character* c, Character* target, const EntityState& e) {
     if (!c || !coop::taskIsCombat(e.task)) return 0;
     if (!g_attackTargetFn) return 0;
     if (!target) return 1;
+    // attackTarget commits a MELEE attack: never on a copy that should be shooting.
+    if (copyShouldShoot(c, target, e)) return 0;
     __try {
         g_attackTargetFn(c, target);
         return 2;
@@ -1808,7 +1864,7 @@ bool readMedical(Character* c, MedicalRead* out) {
         out->limbFlesh[i] = -1.0f; out->limbBand[i] = -1.0f; out->limbMax[i] = -1.0f;
         out->limbState[i] = 0xFF;
     }
-    out->hunger = -1.0f; out->fed = -1.0f; out->dazed = -1.0f;
+    out->hunger = -1.0f; out->fed = -1.0f; out->dazed = -1.0f; out->koTimer = -1.0f;
     if (!c) return false;
     __try {
         MedicalSystem* med = &c->medical;
@@ -1824,6 +1880,7 @@ bool readMedical(Character* c, MedicalRead* out) {
         out->hunger = med->hunger;
         out->fed    = med->fed;
         out->dazed  = med->dazedOrAlert;
+        out->koTimer = med->knockoutTimer;
         // Limb order = RobotLimbs::Limb (LEFT_ARM, RIGHT_ARM, LEFT_LEG, RIGHT_LEG).
         MedicalSystem::HealthPartStatus* parts[4] = {
             med->leftArm, med->rightArm, med->leftLeg, med->rightLeg
@@ -1910,9 +1967,19 @@ bool writeMedical(Character* c, const MedicalRead& in) {
                 if (!p) continue;
                 if ((unsigned char)p->whatAmI != pr.partType ||
                     (unsigned char)p->side    != pr.side) continue;
-                // -1 = the OWNER's field is unreadable; never write that.
-                if (pr.flesh     >= 0.0f) p->flesh       = pr.flesh;
-                if (pr.fleshStun >= 0.0f) p->fleshStun   = pr.fleshStun;
+                // flesh / fleshStun are written UNCONDITIONALLY for a used part.
+                // They used to be gated on >= 0 ("-1 = the owner's field is
+                // unreadable"), but readMedical never produces that for a used
+                // part - an unreadable one is simply used=false - while Kenshi
+                // limb health legitimately goes NEGATIVE on a wrecked part. So
+                // the moment a part dropped below zero the copy stopped
+                // following its owner and ran on the local sim alone: the "host
+                // sees -97, client sees -124" report, and a copy that showed a
+                // limb as merely hurt while its owner could not use it.
+                // bandaging / juryRig are never negative in the engine, so < 0
+                // stays a "do not write" marker there (applyMedical uses it).
+                p->flesh     = pr.flesh;
+                p->fleshStun = pr.fleshStun;
                 if (pr.bandaging >= 0.0f) p->bandaging   = pr.bandaging;
                 if (pr.juryRig   >= 0.0f) p->juryRigging = pr.juryRig;
             }
@@ -2273,17 +2340,21 @@ bool reviveSubject(GameWorld* gw, const unsigned int subjHand[5]) {
     }
 }
 
-bool vetoLocalDeath(Character* c) {
+bool vetoLocalDeath(Character* c, bool keepDown) {
     if (!c) return false;
     // Only act on a body the local sim has actually killed - the caller gates
     // on the OWNER stream reporting alive, so this un-does a purely-local death.
     if (!(g_isDeadCharFn && g_isDeadCharFn(c))) return false;
-    // Release the forced KO + ragdoll first (own SEH), same lever as revive.
-    knockDown(c, false);
+    // Release the forced KO + ragdoll first (own SEH), same lever as revive -
+    // but only when the OWNER has the body upright. While the owner still
+    // reports it down, un-kill and leave it lying: releasing the KO stood a
+    // "dead" animal up on the looter's screen (session 2026-11-18: [death] veto
+    // on a KO'd beak thing and a KO'd bull the join was looting).
+    if (!keepDown) knockDown(c, false);
     __try {
         MedicalSystem* med = &c->medical;
         med->dead       = false; // Character::isDead() reads this -> clears BODY_DEAD
-        med->unconcious = false;
+        if (!keepDown) med->unconcious = false;
         if (med->blood < 80.0f) med->blood = 80.0f; // healthy floor (raise only)
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {

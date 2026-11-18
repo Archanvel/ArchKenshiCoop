@@ -561,6 +561,8 @@ bool beginSend(NetLink& net, u32 localId, const std::string& name, u32 targetMas
 }
 
 bool sending() { return g_sendActive; }
+const std::string& sendName() { return g_sendName; }
+u32 sendMask() { return g_sendMask; }
 
 bool tickSend(NetLink& net, u32 localId) {
     if (!g_sendActive) return false;

@@ -714,7 +714,68 @@ TownIsPlayerBldgsFn  g_townIsPlayerBldgsFn  = 0;
 // ride the money + inventory channels; only the VENDOR-side mutation stays
 // local, which this line makes measurable.
 BuyItemFn g_buyItemOrig = 0;
+extern VendorRefreshGateFn g_vendorRefreshGate; // defined below (protocol 60 restock gate)
+
+// Session 2026-11-18 (2): on the JOIN, a seated bar NPC's local copy bought out
+// of a host-mirrored shop counter (join "[shop] BUY-LOCAL ... buyer=1,3577270528").
+// The join's vendor detector cannot tell who traded, so it published the stock
+// loss and the merchant's cash gain as a player trade and the host applied it -
+// fabricated money. NPC trades are the HOST's business (it runs the real NPC and
+// its own purchase reaches the join through the counter snapshots), so on a join
+// a purchase out of a counter the host mirrors is refused unless the buyer is a
+// player-squad character. A null return is the engine's ordinary "purchase
+// failed" outcome (the host logs ok=0 NPC buys all the time), so the NPC's AI
+// simply gives up on this attempt. Only the buy direction out of a COUNTER is
+// gated: a seller that is a bag/backpack/trader stays untouched (never a counter),
+// and a buyer that is not a character (a bag a player drops into) is allowed.
+// The gate pointer is set only on a join with vendor sync on (Plugin.cpp), so the
+// host and sync-off sessions never refuse. Caller holds SEH.
+static bool joinRefusesNpcBuy(Inventory* self, RootObject* sendingTo) {
+    if (!g_vendorRefreshGate || !self || !sendingTo) return false;
+    RootObject* seller = self->owner;
+    if (!seller) return false;
+    unsigned int sh[5] = { 0, 0, 0, 0, 0 };
+    if (!readObjectHand(seller, sh)) return false;
+    unsigned int owner[5];
+    if (!readShopCounterOwner(sh, owner)) return false;         // not a shop counter
+    if (owner[1] == 0 && owner[2] == 0) return false;            // no trader platoon named
+    if (!g_vendorRefreshGate(owner[1], owner[2])) return false;  // the host does not mirror it
+    unsigned int bh[5] = { 0, 0, 0, 0, 0 };
+    if (!readObjectHand(sendingTo, bh)) return false;
+    if (bh[0] != (unsigned int)CHARACTER) return false;          // not a character buying
+    if (ou && isPlayerSquad(ou, sendingTo)) return false;        // our own squad
+    if (static_cast<Character*>(sendingTo)->isPlayerCharacter()) return false; // player faction
+    return true;
+}
+
 Item* __fastcall buyItem_hook(Inventory* self, Item* itemToBuy, RootObject* sendingTo) {
+    bool refuse = false;
+    __try { refuse = joinRefusesNpcBuy(self, sendingTo); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { refuse = false; }
+    if (refuse) {
+        // At most one line per 5 s per buyer: an NPC may retry every few frames.
+        static unsigned int s_refC = 0, s_refS = 0;
+        static DWORD        s_refMs = 0;
+        __try {
+            unsigned int sh[5] = { 0, 0, 0, 0, 0 }, bh[5] = { 0, 0, 0, 0, 0 };
+            readObjectHand(self->owner, sh);
+            readObjectHand(sendingTo, bh);
+            const DWORD nowT = GetTickCount();
+            if (bh[3] != s_refC || bh[4] != s_refS || (nowT - s_refMs) >= 5000) {
+                s_refC = bh[3]; s_refS = bh[4]; s_refMs = nowT;
+                char sid[48]; sid[0] = '\0';
+                GameData* gd = itemToBuy ? itemToBuy->getGameData() : 0;
+                if (gd) { strncpy(sid, gd->stringID.c_str(), sizeof(sid) - 1); sid[sizeof(sid) - 1] = '\0'; }
+                char b[224];
+                _snprintf(b, sizeof(b) - 1,
+                          "[shop] BUY-REFUSED (join: non-player buyer at host-owned counter) "
+                          "sid='%s' seller=%u,%u buyer=%u,%u",
+                          sid, sh[3], sh[4], bh[3], bh[4]);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        return 0;
+    }
     Item* got = g_buyItemOrig(self, itemToBuy, sendingTo);
     __try {
         char sid[48]; sid[0] = '\0';
@@ -758,7 +819,17 @@ void __fastcall refreshInv_hook(ActivePlatoon* self, bool firstTime) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     bool skip = isTrader == 1 && (lh[1] != 0 || lh[2] != 0) && g_vendorRefreshGate &&
                 g_vendorRefreshGate(lh[1], lh[2]);
-    if (isTrader == 1) {
+    // The engine polls refreshInventory(false) EVERY FRAME for the shop a player
+    // stands in (14,101 lines in 3 minutes, session 2026-11-18). Log the first
+    // of a run, then at most one per 5 s per (leader, verdict).
+    static unsigned int s_lastC = 0, s_lastS = 0;
+    static int          s_lastSkip = -1;
+    static DWORD        s_lastMs = 0;
+    const DWORD nowT = GetTickCount();
+    const bool repeat = !firstTime && lh[1] == s_lastC && lh[2] == s_lastS &&
+                        (skip ? 1 : 0) == s_lastSkip && (nowT - s_lastMs) < 5000;
+    if (isTrader == 1 && !repeat) {
+        s_lastC = lh[1]; s_lastS = lh[2]; s_lastSkip = skip ? 1 : 0; s_lastMs = nowT;
         char b[176];
         _snprintf(b, sizeof(b) - 1,
                   "[vendor] %s first=%d leader=%u,%u,%u,%u,%u",
@@ -1698,6 +1769,7 @@ InCombatModeFn    g_inCombatModeFn    = 0;
 GetCombatClassFn  g_getCombatClassFn  = 0;
 AttackTargetFn    g_attackTargetFn    = 0;
 CharBodyBoolFn    g_inRangedModeFn    = 0;
+CharBodyBoolFn    g_useRangedFn       = 0; // Character::shouldUseRangedWeapons
 CharBodyBoolFn    g_underMeleeFn      = 0;
 CharBodyBoolFn    g_fleeingFn         = 0;
 
@@ -1989,6 +2061,9 @@ void resolve() {
         &Character::getCombatClass);
     g_inRangedModeFn = (CharBodyBoolFn)KenshiLib::GetRealAddress(
         &Character::isInRangedCombatMode);
+    // Non-fatal: unresolved -> a ranged copy keeps the melee order (old behaviour).
+    g_useRangedFn    = (CharBodyBoolFn)KenshiLib::GetRealAddress(
+        &Character::shouldUseRangedWeapons);
     g_underMeleeFn   = (CharBodyBoolFn)KenshiLib::GetRealAddress(
         &Character::isLiterallyUnderMeleeAttackRightNowForSure);
     g_fleeingFn      = (CharBodyBoolFn)KenshiLib::GetRealAddress(&Character::isFleeing);

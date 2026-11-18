@@ -105,6 +105,7 @@ static void fillMedicalPacket(MedicalPacket& pkt, const unsigned int subj[5],
         pkt.limbState[i] = mr.limbState[i];
         strncpy(pkt.limbSid[i], mr.limbSid[i], sizeof(pkt.limbSid[i]) - 1);
     }
+    pkt.koTimer = mr.unconscious ? mr.koTimer : -1.0f;
 }
 
 void Replicator::publishMedical(GameWorld* gw, NetLink& net, u32 ownerId) {
@@ -245,6 +246,8 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
     // 1. Drain received snapshots onto driven copies (never a body we own).
     std::deque<InboundMedical> got;
     in.drainMedical(got);
+    const unsigned long TREAT_HOLD_MS = 3000;
+    const unsigned long nowRx = nowMs();
     for (std::deque<InboundMedical>::iterator it = got.begin(); it != got.end(); ++it) {
         const MedicalPacket& p = it->pkt;
         Key k; k.t = p.sType; k.c = p.sContainer; k.cs = p.sContainerSerial;
@@ -288,6 +291,34 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         // transition, and writeMedical applies it so the copy's crawl gait can
         // engage (the posture apply in applyTargets is the other half).
         w.crippled    = (p.flags & MED_CRIPPLED) != 0;
+        MedRecv& r = medRecv_[k];
+        // Protocol 67: remember the owner's KO countdown; the drive's down hold
+        // counts it down locally instead of pinning a constant 8 s.
+        if (p.koTimer >= 0.0f && p.koTimer < 100000.0f) {
+            r.koTimer = p.koTimer; r.koRecvMs = nowRx;
+        } else {
+            r.koTimer = -1.0f; r.koRecvMs = 0;
+        }
+        // Treatment hold. First aid given HERE to this driven copy raises its
+        // local bandaging; the treatment detector below forwards the level to
+        // the owner about once a second, and the owner's stream then carries it
+        // back. But the owner keeps streaming its OLD bandaging in the meantime
+        // (every 400 ms while it bleeds), and writing that over the copy wiped
+        // out everything the medic added between two forwards - the bar climbed,
+        // snapped back, climbed again. While a forward is recent, keep whichever
+        // bandaging is higher on each part; the owner's echo catches up within
+        // the window, and a treatment the owner rejected is corrected when the
+        // window lapses.
+        if (r.lastFwdMs != 0 && (nowRx - r.lastFwdMs) < TREAT_HOLD_MS) {
+            engine::MedicalRead cur;
+            if (engine::readMedical(c, &cur) && cur.valid) {
+                for (unsigned int i = 0; i < n && i < cur.nParts; ++i) {
+                    if (!w.parts[i].used || !cur.parts[i].used) continue;
+                    if (cur.parts[i].bandaging > w.parts[i].bandaging + 0.25f)
+                        w.parts[i].bandaging = -1.0f; // writeMedical skips < 0
+                }
+            }
+        }
         engine::writeMedical(c, w);
         // Limb-state self-heal (Phase C/D): reconcile stump/crushed/robotic
         // state with the owner's. The reliable EVT_AMPUTATE/EVT_CRUSH events
@@ -306,7 +337,6 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
                 (unsigned)p.limbState[2], (unsigned)p.limbState[3]);
             lb[sizeof(lb) - 1] = '\0'; coop::logLine(lb);
         }
-        MedRecv& r = medRecv_[k];
         for (unsigned int i = 0; i < 12; ++i) {
             float band = (i < n && p.parts[i].used) ? p.parts[i].bandaging : -1.0f;
             r.recvBand[i] = band;
@@ -533,7 +563,11 @@ void Replicator::applyStats(GameWorld* gw, Inbound& in) {
         Key k; k.t = p.sType; k.c = p.sContainer; k.cs = p.sContainerSerial;
         k.i = p.sIndex; k.s = p.sSerial;
         if (ownHands_.find(k) != ownHands_.end()) continue; // never write our own truth
-        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        // bodyForKey, like every sibling channel (medical, treatment, hits,
+        // events): k is the PEER's hand, and a body we hold only as a proxy -
+        // a peer's fresh recruit - does not resolve by it, so its stats were
+        // silently dropped for good.
+        Character* c = bodyForKey(k, 0, 0);
         if (!c) continue;
         engine::StatsRead w;
         memset(&w, 0, sizeof(w));
@@ -1072,6 +1106,7 @@ void Replicator::applyProd(const SyncContext& ctx) {
                 if (ob->second.removed) continue;
                 memcpy(hand, ob->second.hand, sizeof(hand));
             } else {
+                adoptResidentBuild(wk, 0, 0);
                 const PeerBuild* pb = findPeerBuild(wk, it->ownerId);
                 if (!pb || pb->minted != 1 || pb->removed)
                     continue; // unknown / refused / tombstoned key
@@ -1794,6 +1829,42 @@ Replicator::PeerBuild* Replicator::findPeerBuild(const Key& wire, u32 preferPlac
     return const_cast<PeerBuild*>(self->findPeerBuild(wire, preferPlacer));
 }
 
+bool Replicator::adoptResidentBuild(const Key& wire, const char* sid, const float* xz) {
+    if (isHostRole()) return false;
+    if (ownBuilds_.find(wire) != ownBuilds_.end()) return false;
+    if (findPeerBuild(wire, OWNER_ID_ALL) != 0) return false; // known / refused / tombstoned
+    if (mintByLocal_.find(wire) != mintByLocal_.end()) return false; // a proxy's local hand
+    unsigned int h[5];
+    h[0] = wire.t; h[1] = wire.c; h[2] = wire.cs; h[3] = wire.i; h[4] = wire.s;
+    engine::BuildRead cur;
+    if (!engine::readBuildingByHand(h, &cur)) return false;
+    if (cur.sid[0] == '\0') return false;
+    if (sid && sid[0] && strncmp(cur.sid, sid, sizeof(cur.sid) - 1) != 0) return false;
+    if (xz) {
+        float dx = cur.x - xz[0], dz = cur.z - xz[1];
+        if (dx * dx + dz * dz > 4.0f) return false; // same hand, another object
+    }
+    PeerBuild& pb = peerBuilds_[PeerBuildKey(0, wire)]; // 0 = the host, the placer
+    memcpy(pb.localHand, h, sizeof(pb.localHand));
+    pb.minted = 1;
+    mintByLocal_[wire] = wire;
+    char b[256];
+    _snprintf(b, sizeof(b) - 1,
+              "[build] MINT key=%u.%u.%u.%u.%u sid='%s' ui=0 rc=1 "
+              "local=%u.%u.%u.%u.%u adopted=1 (save-resident copy)",
+              h[0], h[1], h[2], h[3], h[4], cur.sid, h[0], h[1], h[2], h[3], h[4]);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    // The copy already holds the state the save carried; say so in the same
+    // shape a applied STATE row logs, so the log reads the same either way.
+    _snprintf(b, sizeof(b) - 1,
+              "[build] STATE-RECV key=%u.%u.%u.%u.%u prog=%.3f complete=%d "
+              "ok=1 localProg=%.3f localComplete=%d seq=0 adopted=1",
+              h[0], h[1], h[2], h[3], h[4], cur.progress, cur.complete,
+              cur.progress, cur.complete);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    return true;
+}
+
 // Build-site pose subject translation. A construction site is created at RUNTIME,
 // so unlike every other pose fixture its hand is client-local: a placement logged
 // 0.3409.11111.2.3348877056 on the placer and ...2871948288 on the peer. A streamed
@@ -1824,6 +1895,7 @@ bool Replicator::localHandForBuildKey(const Key& wire, unsigned int out[5],
         memcpy(out, ob->second.hand, sizeof(unsigned int) * 5);
         return true;
     }
+    const_cast<Replicator*>(this)->adoptResidentBuild(wire, 0, 0);
     const PeerBuild* pb = findPeerBuild(wire, preferPlacer);
     if (pb && pb->minted == 1 && !pb->removed) {
         memcpy(out, pb->localHand, sizeof(unsigned int) * 5);
@@ -1962,6 +2034,10 @@ void Replicator::applyBuilds(const SyncContext& ctx) {
         k.i = p.key[3]; k.s = p.key[4];
         // Keyed by the PLACER (the sender): two joins' runtime hands can collide.
         PeerBuildKey pkey(it->ownerId, k);
+        if (it->ownerId == 0) {
+            float xz[2]; xz[0] = p.x; xz[1] = p.z;
+            adoptResidentBuild(k, p.sid, xz);
+        }
         if (peerBuilds_.find(pkey) != peerBuilds_.end())
             continue; // already minted (or mint already refused) - dedupe
         PeerBuild& pb = peerBuilds_[pkey];
@@ -1992,6 +2068,7 @@ void Replicator::applyBuilds(const SyncContext& ctx) {
         const BuildStatePacket& p = it->pkt;
         Key k; k.t = p.key[0]; k.c = p.key[1]; k.cs = p.key[2];
         k.i = p.key[3]; k.s = p.key[4];
+        if (it->ownerId == 0) adoptResidentBuild(k, 0, 0);
         std::map<PeerBuildKey, PeerBuild>::iterator f =
             peerBuilds_.find(PeerBuildKey(it->ownerId, k)); // sender = placer
         if (f == peerBuilds_.end() || !f->second.minted)
@@ -2036,6 +2113,7 @@ void Replicator::applyBuilds(const SyncContext& ctx) {
         const BuildRemovePacket& p = it->pkt;
         Key k; k.t = p.key[0]; k.c = p.key[1]; k.cs = p.key[2];
         k.i = p.key[3]; k.s = p.key[4];
+        if (it->ownerId == 0) adoptResidentBuild(k, 0, 0);
         std::map<PeerBuildKey, PeerBuild>::iterator f =
             peerBuilds_.find(PeerBuildKey(it->ownerId, k)); // sender = placer
         if (f == peerBuilds_.end() || !f->second.minted || f->second.removed)
@@ -2288,6 +2366,7 @@ void Replicator::applyBuildDoors(const SyncContext& ctx) {
             localHand = oit->second.hand;
         } else {
             // The row names no placer: prefer the sender's own placement.
+            adoptResidentBuild(k, 0, 0);
             const PeerBuild* pb = findPeerBuild(k, it->ownerId);
             if (pb && pb->minted && !pb->removed)
                 localHand = pb->localHand;
@@ -2520,7 +2599,7 @@ void Replicator::publishStealth(GameWorld* gw, NetLink& net, u32 ownerId) {
     for (std::map<Key, Driven>::iterator it = targets_.begin(); it != targets_.end(); ++it) {
         const Key& k = it->first;
         if (ownHands_.find(k) != ownHands_.end()) continue;
-        Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        Character* c = bodyForKey(k, 0, 0); // wire key: may be a proxy body
         if (!c) continue;
         engine::StealthRead sr;
         if (!engine::readStealth(c, &sr) || !sr.valid) continue;
@@ -2652,12 +2731,22 @@ void forgetRowSeq(RowMap& rows, u32 id) {
 }
 } // namespace
 
+void Replicator::notePeerLoading(u32 id) {
+    if (!speedLoadPause_ || id == OWNER_ID_ALL) return;
+    speedLoading_[id] = nowMs();
+    char b[96]; _snprintf(b, sizeof(b) - 1,
+        "[speed] LOADING owner=%u (world held paused until it reports in)", (unsigned)id);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+}
+
 void Replicator::forgetPeerChannels(u32 id) {
     const bool all = (id == OWNER_ID_ALL);
     if (all) {
         speedVotes_.clear(); timePeers_.clear(); poolAckedBy_.clear();
+        speedLoading_.clear();
     } else {
         speedVotes_.erase(id); timePeers_.erase(id); poolAckedBy_.erase(id);
+        speedLoading_.erase(id); // a join that left mid-load holds nothing
     }
     // The departed join's vote no longer holds the session paused/slow.
     refreshPeerSpeedVotes();
@@ -2708,7 +2797,10 @@ void Replicator::syncSpeed(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId
                            bool isHost) {
     const unsigned long RESEND_MS        = 3000; // safety resend (late join / lost state)
     const unsigned long COMBAT_SAMPLE_MS = 1000; // own-squad combat poll cadence
-    const unsigned long COMBAT_HOLD_MS   = 4000; // cap hysteresis: hold past brief gaps
+    // 10 s (was 4 s): session 2026-11-18 (2) - in a 15-bandit fight the cap
+    // released between engagements and the world ran at 5x for 35 s of the
+    // brawl (94 combat snaps on the other screen in that window).
+    const unsigned long COMBAT_HOLD_MS   = 10000; // cap hysteresis: hold past brief gaps
     const float         EPS              = 0.01f;
     unsigned long now = nowMs();
 
@@ -2730,7 +2822,13 @@ void Replicator::syncSpeed(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId
              it != ownHands_.end(); ++it) {
             Character* c = engine::resolveCharByHand(it->i, it->s, it->t, it->c, it->cs);
             engine::CombatRead cr;
-            if (c && engine::readCombat(c, &cr) && cr.inCombat) { fighting = true; break; }
+            // isInCombatMode flickers off between engagements; combatModeActive
+            // (the stable engaged read the stream uses) and "a melee attack is
+            // landing on me" count as fighting too.
+            if (c && engine::readCombat(c, &cr) &&
+                (cr.inCombat || (cr.modeActive && cr.hasTarget) || cr.underMelee)) {
+                fighting = true; break;
+            }
         }
         if (fighting) speedCombatHoldMs_ = now;
         bool held = (speedCombatHoldMs_ != 0) && ((now - speedCombatHoldMs_) < COMBAT_HOLD_MS);
@@ -2751,6 +2849,7 @@ void Replicator::syncSpeed(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId
     // requested multiplier survives a pause (the engine's own model), so
     // unpausing restores the player's request, not the arbitrated effective.
     bool userActed = false;
+    bool userPick  = false; // userActed AND the action picked a speed (see below)
     // A dialogue's auto-pause is the engine's, not a vote (Replicator.h,
     // speedDlgOpen_). bandit_chase 20261022_134931: the Holy Sentinel's search
     // opened on the join, its pause became the join's vote, nobody answered,
@@ -2783,7 +2882,16 @@ void Replicator::syncSpeed(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId
                 }
                 continue;
             }
-            speedMyReq_ = ip ? 0.0f : im;
+            const float nreq = ip ? 0.0f : im;
+            // Speed policy: is this a click that CHOOSES a speed, or only an
+            // unpause back to the multiplier already asked for? Only the first
+            // may move the session's speed under "last" - otherwise whoever
+            // lifts a pause would drag the world back to their own old vote.
+            if (nreq > EPS && speedMyReq_ >= 0.0f &&
+                (speedMyReq_ > EPS || fabs(nreq - speedMyMult_) > EPS))
+                userPick = true;
+            if (nreq > EPS) speedMyMult_ = nreq;
+            speedMyReq_ = nreq;
             userActed = true;
         }
     }
@@ -2793,7 +2901,21 @@ void Replicator::syncSpeed(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId
         float mult = 0.0f; bool paused = false;
         if (!engine::readGameSpeed(gw, &mult, &paused)) return;
         speedMyReq_ = paused ? 0.0f : mult;
+        // A JOIN that comes up paused has not VOTED to pause: its world loaded
+        // that way (the host's save was baked while the host held the session
+        // paused for this very load - see notePeerLoading - or simply while
+        // someone had paused). Seeding that as a vote left both worlds frozen
+        // until the joining player found the pause key. The host's SET is
+        // applied below either way, so a pause the HOST still wants holds.
+        if (!isHost && paused) speedMyReq_ = (mult > EPS) ? mult : 1.0f;
+        if (mult > EPS) speedMyMult_ = mult;
         userActed = true;
+    }
+    if (isHost && userPick && speedPolicy_ == 1) {
+        speedLead_ = speedMyReq_;
+        char b[80]; _snprintf(b, sizeof(b) - 1,
+            "[speed] LEAD mult=%.2f by=host", speedLead_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
     if (userActed) {
         char b[112]; _snprintf(b, sizeof(b) - 1,
@@ -2824,6 +2946,31 @@ void Replicator::syncSpeed(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId
                     (unsigned)it->ownerId, req, pkPaused ? 1 : 0, cmb ? 1 : 0);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             }
+            // A speed REQ only ever comes from a live world: this join has
+            // finished loading, so it no longer holds the join-load pause.
+            if (speedLoading_.erase(it->ownerId) != 0) {
+                char lb[96]; _snprintf(lb, sizeof(lb) - 1,
+                    "[speed] LOADED owner=%u (in world; join-load pause released)",
+                    (unsigned)it->ownerId);
+                lb[sizeof(lb) - 1] = '\0'; coop::logLine(lb);
+            }
+            // Policy "last": a join's fresh speed click takes the lead. A join
+            // that sets SPEED_EXT says so explicitly (SPEED_USER); an older
+            // build does not, and there a changed vote is the best signal.
+            // Adopted values and safety resends never carry SPEED_USER, so two
+            // clicks crossing on the wire settle instead of echoing.
+            if (speedPolicy_ == 1 && req > EPS) {
+                const bool pick = (p.flags & SPEED_EXT)
+                    ? ((p.flags & SPEED_USER) != 0)
+                    : (v.req >= 0.0f && fabs(req - v.req) > EPS);
+                if (pick) {
+                    speedLead_ = req;
+                    char b[96]; _snprintf(b, sizeof(b) - 1,
+                        "[speed] LEAD mult=%.2f by=owner %u", req,
+                        (unsigned)it->ownerId);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+            }
             v.req    = req;
             v.combat = cmb;
         } else if (p.type == (u8)PKT_SPEED_SET && !isHost) {
@@ -2848,6 +2995,18 @@ void Replicator::syncSpeed(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId
                     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
                 }
             }
+            // Policy "last"/"host" on the host: the effective IS everyone's
+            // request now. Skipped while paused or combat-capped (that value
+            // is not a chosen speed) and on a tick the player just clicked
+            // (their click is on its way to the host and must not be undone).
+            speedFollow_ = (p.flags & SPEED_FOLLOW) != 0;
+            if (speedFollow_ && !pkPaused && !userActed &&
+                !(p.flags & SPEED_IN_COMBAT) &&
+                fabs(eff - speedMyMult_) > EPS) {
+                speedMyMult_ = eff;
+                if (speedMyReq_ > EPS) speedMyReq_ = eff;
+                engine::adoptSpeedVote(eff);
+            }
         }
     }
     if (isHost) refreshPeerSpeedVotes();
@@ -2858,6 +3017,54 @@ void Replicator::syncSpeed(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId
         // pause (0) is already below 1, so min semantics preserve it.
         float eff = (speedMyReq_ >= 0.0f) ? speedMyReq_ : 1.0f;
         if (speedPeerReq_ >= 0.0f && speedPeerReq_ < eff) eff = speedPeerReq_;
+        if (speedPolicy_ != 0) {
+            // "last" / "host": pause keeps the consensus rule - anyone can
+            // pause, and the world resumes when nobody holds one (the min
+            // above is 0 exactly then). The running speed is not a minimum
+            // any more: it is the last click ("last", speedLead_) or the
+            // host's own request ("host").
+            const bool anyPause = (eff <= EPS);
+            float want = (speedMyMult_ > EPS) ? speedMyMult_ : 1.0f;
+            if (speedPolicy_ == 1) {
+                if (speedLead_ <= EPS) speedLead_ = want; // nobody clicked yet
+                want = speedLead_;
+            }
+            eff = anyPause ? 0.0f : want;
+            // The host's own remembered request follows the lead, like a
+            // join's does on SPEED_FOLLOW, so its unpause restores the speed
+            // in force rather than a vote it cast an hour ago.
+            if (!userActed && fabs(want - speedMyMult_) > EPS) {
+                speedMyMult_ = want;
+                if (speedMyReq_ > EPS) speedMyReq_ = want;
+                engine::adoptSpeedVote(want);
+            }
+        }
+        // Join-load pause: a join that connected and has not reported from a
+        // live world yet holds the session paused, exactly like a pause vote,
+        // so the clock it will load into has not run away from it. Bounded -
+        // a join that crashes in its loading screen must not freeze the host.
+        {
+            const unsigned long LOAD_PAUSE_MAX_MS = 240000;
+            for (std::map<u32, unsigned long>::iterator li = speedLoading_.begin();
+                 li != speedLoading_.end(); ) {
+                if ((now - li->second) >= LOAD_PAUSE_MAX_MS) {
+                    char b[112]; _snprintf(b, sizeof(b) - 1,
+                        "[speed] LOADING owner=%u gave up after %lus (resuming without it)",
+                        (unsigned)li->first, LOAD_PAUSE_MAX_MS / 1000);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                    speedLoading_.erase(li++);
+                } else {
+                    ++li;
+                }
+            }
+            const bool holdLoad = speedLoadPause_ && !speedLoading_.empty();
+            if (holdLoad) eff = 0.0f;
+            if (holdLoad != speedLoadPauseOn_) {
+                speedLoadPauseOn_ = holdLoad;
+                coop::logLine(holdLoad ? "[speed] join-load pause ON"
+                                       : "[speed] join-load pause OFF");
+            }
+        }
         bool combat = speedMyCombat_ || speedPeerCombat_;
         if (combat && speedCombatCap_ && eff > 1.0f) eff = 1.0f;
         bool changed = (speedLastSet_ < 0.0f || fabs(eff - speedLastSet_) > EPS);
@@ -2881,7 +3088,8 @@ void Replicator::syncSpeed(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId
             pkt.seq     = speedSeqOut_++;
             pkt.speed   = eff;
             pkt.flags   = (effPaused ? SPEED_PAUSED : 0) |
-                          (combat ? SPEED_IN_COMBAT : 0);
+                          (combat ? SPEED_IN_COMBAT : 0) |
+                          (speedPolicy_ != 0 ? SPEED_FOLLOW : 0);
             net.queueSpeed(pkt);
             speedLastSet_    = eff;
             speedLastSendMs_ = now;
@@ -2904,7 +3112,8 @@ void Replicator::syncSpeed(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId
             pkt.seq     = speedSeqOut_++;
             pkt.speed   = (speedMyReq_ >= 0.0f) ? speedMyReq_ : 1.0f;
             pkt.flags   = ((speedMyReq_ >= 0.0f && speedMyReq_ <= EPS) ? SPEED_PAUSED : 0) |
-                          (speedMyCombat_ ? SPEED_IN_COMBAT : 0);
+                          (speedMyCombat_ ? SPEED_IN_COMBAT : 0) |
+                          SPEED_EXT | (userPick ? SPEED_USER : 0);
             net.queueSpeed(pkt);
             speedLastSendMs_ = now;
         }

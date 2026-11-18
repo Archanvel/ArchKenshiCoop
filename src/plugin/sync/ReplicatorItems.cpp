@@ -1039,6 +1039,10 @@ void Replicator::detectAndPublishWeaponDrops(GameWorld* gw, NetLink& net, u32 ow
     const int          MAX_RETRY   = 30;    // ticks to keep looking for the ground copy
     static int dumpWd = -1;
     if (dumpWd < 0) { const char* e = getenv("KENSHICOOP_INV_DUMP"); dumpWd = (e && e[0] == '1') ? 1 : 0; }
+    // When was a local trade window last open? Sampled every tick, so the sale test in the
+    // drop-fallback below still knows about a window that closed during its debounce.
+    static unsigned long s_tradeSeenMs = 0; // main thread only
+    if (tradeOpen_) s_tradeSeenMs = nowMs();
     InvItemEntry items[INV_ITEMS_MAX];
     for (std::set<Key>::iterator it = ownHands_.begin(); it != ownHands_.end(); ++it) {
         unsigned int cHand[5] = { it->t, it->c, it->cs, it->i, it->s };
@@ -1275,7 +1279,40 @@ void Replicator::detectAndPublishWeaponDrops(GameWorld* gw, NetLink& net, u32 ow
                 // at the OWNER's position as the mirror target - the weapon was dropped at its
                 // feet, so the peer relocating its own copy there reproduces the drop. (A rare
                 // intra-squad trade would be mirrored as a drop here; reconcile then corrects it.)
+                // When this loss was FIRST seen (the debounce arm), before the erase.
+                unsigned long armMs = 0;
+                {
+                    std::map<std::string, unsigned long>::iterator am =
+                        prevC.retryArmMs.find(pe->first);
+                    if (am != prevC.retryArmMs.end()) armMs = am->second;
+                }
                 prevC.retries.erase(pe->first); prevC.retryArmMs.erase(pe->first);
+                // A SALE is not a drop. With a trade window open, gear that leaves the bag
+                // and is found nowhere on the ground went to the merchant - the engine moves
+                // or frees the object, and the shop counter's own snapshot + the trade table
+                // carry the result to the peer. Authoring a ground drop here made the peer
+                // materialise a copy at our feet (a free duplicate of everything sold) and
+                // left us tracking a pointer the engine had already freed (the 2026-11-16
+                // host crash). The window is honoured a little past its close, because the
+                // debounce above can outlive a quick sell-and-close.
+                {
+                    const unsigned long nowT = nowMs();
+                    // Judged by when the loss was first SEEN, not by when its
+                    // debounce ran out: the debounce can be re-armed for seconds
+                    // (the 2026-11-16 session authored two drops 4.8 s after the
+                    // trade window closed, for gear sold inside it).
+                    const bool soldInWindow = s_tradeSeenMs != 0 && armMs != 0 &&
+                                              (s_tradeSeenMs + 500 >= armMs);
+                    if (tradeOpen_ || soldInWindow ||
+                        (s_tradeSeenMs != 0 && (nowT - s_tradeSeenMs) < 3000)) {
+                        char b[200]; _snprintf(b, sizeof(b) - 1,
+                            "[wd] decrease-trade hand=%u,%u,%u,%u,%u sid='%s' delta=%d "
+                            "(trade window open, no ground copy: a sale, not a drop)",
+                            it->t, it->c, it->cs, it->i, it->s, pe->first.c_str(), delta);
+                        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                        continue;
+                    }
+                }
                 if (!engine::objectWorldPos(cHand, pos)) {
                     if (dumpWd) { char b[160]; _snprintf(b, sizeof(b) - 1,
                         "[wd] decrease-nopos hand=%u,%u,%u,%u,%u sid='%s' (owner pos unresolved; skip)",
@@ -1569,6 +1606,35 @@ RootObject* resolveGroundGear(const unsigned int hand[5], void* cached) {
     if (!engine::groundObjectLiveness(byHand, 0, &pickedUp)) return 0;
     return byHand;
 }
+
+// May this tracked pointer be HANDED TO THE ENGINE (tryAddItem / destroy)? Reading a stale
+// pointer is survivable - every read above is SEH-guarded. Passing one on is not: the
+// engine pools item memory, so a freed Item still reads as a plausible live object
+// (isInInventory clear, vtable intact) for a while after it is gone, and the guard never
+// fires. That is the 2026-11-16 host crash: gear SOLD to a trader was tracked as a ground
+// drop, the engine freed it, the peer "picked up" its mirrored copy, and tryAddItem put the
+// freed pointer into the peer character's bag - the next inventory walk read through it and
+// the game faulted in its own GUI code ~250 ms later. So a pointer is only ever passed on
+// when the engine's own handle table still maps the object's hand back to this very
+// pointer. A track with no hand, or one whose hand resolves elsewhere, is not trusted.
+bool groundGearVerified(const unsigned int hand[5], RootObject* ro) {
+    if (!ro) return false;
+    bool haveHand = false;
+    for (int k = 0; k < 5; ++k) if (hand[k] != 0) { haveHand = true; break; }
+    if (!haveHand) return false;
+    return engine::resolveObjectByHand(hand) == ro;
+}
+
+void logUnverifiedGear(const char* where, const std::string& sid, u32 dropOwnerId, u32 dropId,
+                       const unsigned int hand[5], RootObject* ro) {
+    char b[260]; _snprintf(b, sizeof(b) - 1,
+        "[wd] REHOME-UNVERIFIED at=%s sid='%s' drop=%u/%u hand=%u,%u,%u,%u,%u item=%p "
+        "byHand=%p (handle table does not map this hand to the tracked object; not touching "
+        "it - falling back to the site scan)",
+        where, sid.c_str(), dropOwnerId, dropId, hand[0], hand[1], hand[2], hand[3], hand[4],
+        (void*)ro, (void*)engine::resolveObjectByHand(hand));
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+}
 } // namespace
 
 void Replicator::retryPendingPickups(GameWorld* gw) {
@@ -1588,6 +1654,13 @@ void Replicator::retryPendingPickups(GameWorld* gw) {
                 if (g->dropOwnerId != it->refOwnerId || g->dropId != it->refDropId) continue;
                 RootObject* ro = resolveGroundGear(g->hand, g->item);
                 if (!ro) break;
+                if (!groundGearVerified(g->hand, ro)) {
+                    // Never pass an unverified pointer on; drop the track and let the
+                    // site scan below find a real ground object instead.
+                    logUnverifiedGear("retry", it->sid, g->dropOwnerId, g->dropId, g->hand, ro);
+                    sit->second.erase(g);
+                    break;
+                }
                 moved = injectRehomeRefusal()
                             ? 0 : engine::addItemPtrToInventory(gw, it->targetHand, ro);
                 if (moved) { how = "track"; sit->second.erase(g); }
@@ -1663,6 +1736,16 @@ void Replicator::reconcileGroundGear(GameWorld* gw) {
             // A peer took this item but our own bag refused the object. Retry: the refusal is
             // often transient (the container was still resolving, or a reconcile has since
             // freed the equip slot).
+            if (!groundGearVerified(g->hand, ro)) {
+                // The pointer can no longer be vouched for, so neither tryAddItem nor the
+                // dedupe destroy below may see it. Hand the intent to the pointer-free
+                // retry (site scan) and forget the track.
+                logUnverifiedGear("reconcile", sit->first, g->dropOwnerId, g->dropId, g->hand, ro);
+                parkPendingPickup(g->pendingHand, sit->first.c_str(), g->pendingType,
+                                  g->dropOwnerId, g->dropId);
+                g = q.erase(g);
+                continue;
+            }
             int moved = injectRehomeRefusal() ? 0
                                              : engine::addItemPtrToInventory(gw, g->pendingHand, ro);
             if (moved) {
@@ -1758,6 +1841,25 @@ void Replicator::applyWeaponPickups(GameWorld* gw, Inbound& in) {
                 why = "deferred";
                 parkPendingPickup(targetHand, p.stringID, p.itemType,
                                   p.refDropOwnerId, p.refDropId);
+            } else if (!groundGearVerified(pick->hand, ro)) {
+                // The tracked pointer reads as alive but the engine's handle table does not
+                // vouch for it - it may be freed memory (see groundGearVerified). Forget the
+                // track and resolve the pickup WITHOUT it: a real free ground object near
+                // the picker if the scan finds one, else the parked retry.
+                logUnverifiedGear("pickup", std::string(p.stringID), pick->dropOwnerId,
+                                  pick->dropId, pick->hand, ro);
+                q.erase(pick);
+                moved = injectRehomeRefusal()
+                            ? 0
+                            : engine::pickupWorldItemIntoInventory(gw, targetHand, p.stringID,
+                                                                   p.itemType, WD_REHOME_SCAN_R);
+                if (moved) {
+                    why = "recovered-by-site";
+                } else {
+                    why = "unverified";
+                    parkPendingPickup(targetHand, p.stringID, p.itemType,
+                                      p.refDropOwnerId, p.refDropId);
+                }
             } else {
                 moved = injectRehomeRefusal() ? 0
                                              : engine::addItemPtrToInventory(gw, targetHand, ro);
@@ -2284,6 +2386,136 @@ void Replicator::releaseXferLatch(const Key& k, const XKey& key, int delta) {
 
 // ---- Protocol 60: shared vendor stock ---------------------------------------
 
+// Session 2026-11-18 (2) merchant-cash runaway. Two counters of ONE shop
+// (0,2006,..,1725 and 0,2069,..,489) belong to different trader platoons, so they
+// have different ShopKeys - but RootObject::getMoney on both reads the SAME money.
+// The ShopKey-keyed books therefore counted one trade twice (join: CASH SEND
+// id=18 and id=20, delta=81 each; host: cashNow 81 then 162), and the host's
+// CASH MIRROR of counter 489 rebased only 489's ShopKey, so 1725's stale baseline
+// re-reported the mirrored value as a fresh trade every ~1.3 s (cash=166950).
+//
+// We cannot name the engine object getMoney reads (UseableStuff::getMoney is
+// opaque), so the money holder is identified by what it does: counters whose
+// readings move from the same value to the same value at the same instant read
+// the same money. They are merged into one CASH SOURCE (union-find over counter
+// hands), learned three ways - same trader platoon (the old ShopKey assumption),
+// identical lockstep moves between two detector scans (join), and lockstep moves
+// across our own setShopCash write (join applyVendorCash, host applyVendorDeltas),
+// the last one being exact. One cash source is then reported once, rebased as a
+// whole, and its cash legs applied once per sender.
+//
+// These are file-static because Replicator.h is not ours to change here. Session
+// reset: the join clears them when invRecv_ is empty (it is only ever emptied by
+// the world reset - see detectAndPublishVendorDeltas). Stale entries are harmless
+// anyway: a counter hand carries the object's serial, so an old entry can only
+// match the same counter of the same save again, whose money sharing is a fact of
+// that save; g_cashLegHost entries expire after CASH_DUP_MS.
+namespace {
+struct CashCtr {
+    u32 v[5];
+    bool operator<(const CashCtr& o) const {
+        for (int i = 0; i < 5; ++i) if (v[i] != o.v[i]) return v[i] < o.v[i];
+        return false;
+    }
+    bool operator==(const CashCtr& o) const {
+        for (int i = 0; i < 5; ++i) if (v[i] != o.v[i]) return false;
+        return true;
+    }
+    bool operator!=(const CashCtr& o) const { return !(*this == o); }
+};
+typedef std::pair<u32, u32> CashShop; // == Replicator::ShopKey (trader platoon)
+struct CashRow { CashCtr ctr; CashShop sk; int cash; };
+struct CashLeg { CashCtr ctr; int cash; unsigned long ms; };
+
+std::map<CashCtr, CashCtr>  g_cashParent;  // union-find: counter -> parent counter
+std::map<CashCtr, int>      g_cashPrev;    // join: reading at the previous detector scan
+std::map<CashShop, unsigned long> g_cashBaseMs; // join: when a ShopKey's baseline was set
+std::map<CashCtr, CashShop> g_ctrShop;     // join: counter -> its trader platoon (restock gate)
+std::map<std::pair<u32, CashCtr>, CashLeg> g_cashLegHost; // host: (sender, source) -> last leg
+const unsigned long CASH_DUP_MS = 1000;    // host: a sibling leg of one join scan
+
+CashCtr cashCtr(const unsigned int h[5]) {
+    CashCtr c; for (int i = 0; i < 5; ++i) c.v[i] = h[i]; return c;
+}
+
+CashCtr cashRoot(const CashCtr& c) {
+    CashCtr r = c;
+    for (int guard = 0; guard < 256; ++guard) {
+        std::map<CashCtr, CashCtr>::iterator it = g_cashParent.find(r);
+        if (it == g_cashParent.end() || it->second == r) break;
+        r = it->second;
+    }
+    CashCtr x = c; // path compression
+    for (int guard = 0; guard < 256 && x != r; ++guard) {
+        std::map<CashCtr, CashCtr>::iterator it = g_cashParent.find(x);
+        if (it == g_cashParent.end()) break;
+        CashCtr nx = it->second; it->second = r; x = nx;
+    }
+    return r;
+}
+
+// Merge a's and b's cash sources. True when they were separate (a new alias).
+bool cashUnion(const CashCtr& a, const CashCtr& b) {
+    CashCtr ra = cashRoot(a), rb = cashRoot(b);
+    if (ra == rb) return false;
+    if (rb < ra) { CashCtr t = ra; ra = rb; rb = t; }
+    g_cashParent[rb] = ra; // the smaller hand is the root: deterministic
+    return true;
+}
+
+void logCashAlias(const char* how, const CashCtr& a, const CashCtr& b) {
+    char m[224]; _snprintf(m, sizeof(m) - 1,
+        "[vendor] CASH ALIAS (%s) counter=%u,%u,%u,%u,%u shares money with %u,%u,%u,%u,%u",
+        how, a.v[0], a.v[1], a.v[2], a.v[3], a.v[4], b.v[0], b.v[1], b.v[2], b.v[3], b.v[4]);
+    m[sizeof(m) - 1] = '\0'; coop::logLine(m);
+}
+
+void readCashRow(const unsigned int h[5], std::vector<CashRow>& out) {
+    unsigned int owner[5];
+    if (!engine::readShopCounterOwner(h, owner)) return;
+    int cash = -1;
+    if (!engine::readShopCash(h, &cash) || cash < 0) return;
+    CashRow r; r.ctr = cashCtr(h); r.sk = CashShop((u32)owner[1], (u32)owner[2]); r.cash = cash;
+    out.push_back(r);
+}
+
+// Every mirrored shop counter (join: invRecv_ rows flagged shop) that resolves,
+// with its owner platoon and current cash. Templates so the private Key/InvRecv
+// types are deduced rather than named.
+template <class RecvMap>
+void collectRecvCash(const RecvMap& recv, std::vector<CashRow>& out) {
+    out.clear();
+    for (typename RecvMap::const_iterator it = recv.begin(); it != recv.end(); ++it) {
+        if (!it->second.shop) continue;
+        unsigned int h[5] = { it->first.t, it->first.c, it->first.cs, it->first.i, it->first.s };
+        readCashRow(h, out);
+    }
+}
+// Host: every census shop counter (a std::set of keys).
+template <class KeySet>
+void collectCensusCash(const KeySet& keys, std::vector<CashRow>& out) {
+    out.clear();
+    for (typename KeySet::const_iterator it = keys.begin(); it != keys.end(); ++it) {
+        unsigned int h[5] = { it->t, it->c, it->cs, it->i, it->s };
+        readCashRow(h, out);
+    }
+}
+
+// After our own write moved counter `wrote` from `was` to `now`, every other
+// counter that moved identically in the same instant reads the same money.
+void learnWriteAliases(const CashCtr& wrote, int was, int now, const std::vector<CashRow>& pre) {
+    if (was == now || now < 0) return;
+    for (size_t i = 0; i < pre.size(); ++i) {
+        if (pre[i].ctr == wrote || pre[i].cash != was) continue;
+        unsigned int h[5] = { pre[i].ctr.v[0], pre[i].ctr.v[1], pre[i].ctr.v[2],
+                              pre[i].ctr.v[3], pre[i].ctr.v[4] };
+        int after = -1;
+        if (!engine::readShopCash(h, &after) || after != now) continue;
+        if (cashUnion(wrote, pre[i].ctr)) logCashAlias("write", wrote, pre[i].ctr);
+    }
+}
+} // namespace
+
 // Per-item totals of the container at cHand (loose + worn; top level only).
 void Replicator::vendorTotals(GameWorld* gw, const unsigned int cHand[5],
                               std::map<XKey, int>& out) {
@@ -2339,12 +2571,112 @@ void Replicator::detectAndPublishVendorDeltas(GameWorld* gw, NetLink& net, u32 o
     const unsigned long SCAN_MS   = 400;   // detector cadence (the protocol-37 one)
     const unsigned long SETTLE_MS = 600;   // a stack on the trade cursor is not a trade yet
     const unsigned long GRACE_MS  = 10000; // latch lifetime (the host answers by snapshot)
-    const unsigned long FRESH_MS  = 40000; // a mirror older than this no longer gates restock
     unsigned long now = nowMs();
     if (vendorScanMs_ != 0 && now - vendorScanMs_ < SCAN_MS) return;
     vendorScanMs_ = now;
     vendorOwners_.clear();
-    std::set<ShopKey> cashSeen; // one cash check per shop, however many counters
+    // invRecv_ only ever empties on the world reset (ReplicatorCore): the
+    // file-static cash-source books describe the old world then.
+    if (invRecv_.empty()) {
+        g_cashParent.clear(); g_cashPrev.clear(); g_cashBaseMs.clear(); g_ctrShop.clear();
+    }
+    // The restock gate (vendorRefreshGated). Session 2026-11-18 (2): it used to
+    // require a snapshot younger than 40 s, but the host sends a counter only
+    // when it CHANGES - an idle shop's mirror aged out (join 03:34:09 REFRESH-SKIP,
+    // 03:34:11 REFRESH leader=1,9), the join restocked locally and its detector
+    // reported the restock as 8 sales the host applied. The stock is the host's
+    // for the whole session once any snapshot of the counter arrived (invRecv_
+    // keeps the row until the world reset), so every mirrored counter gates its
+    // trader - through the platoon remembered from when it last resolved, so an
+    // unloaded counter keeps gating too.
+    if (vendorSync_) {
+        for (std::map<Key, InvRecv>::iterator ri = invRecv_.begin(); ri != invRecv_.end(); ++ri) {
+            if (!ri->second.shop) continue;
+            const Key& k = ri->first;
+            unsigned int h[5] = { k.t, k.c, k.cs, k.i, k.s };
+            CashCtr ctr = cashCtr(h);
+            unsigned int owner[5];
+            if (engine::resolveObjectByHand(h) != 0 && engine::readShopCounterOwner(h, owner))
+                g_ctrShop[ctr] = CashShop((u32)owner[1], (u32)owner[2]);
+            std::map<CashCtr, CashShop>::iterator cs = g_ctrShop.find(ctr);
+            if (cs != g_ctrShop.end()) vendorOwners_.insert(cs->second);
+        }
+    }
+    // Merchant cash: a settled change against the host's last value is a
+    // trade's cash leg - reported once per CASH SOURCE (see CashCtr above),
+    // however many counters / trader platoons read that money.
+    if (vendorSync_) {
+        std::vector<CashRow> rows;
+        collectRecvCash(invRecv_, rows);
+        // Learn aliases before reporting, so this very scan reports once.
+        for (size_t i = 0; i < rows.size(); ++i) {
+            std::map<CashCtr, int>::iterator pi = g_cashPrev.find(rows[i].ctr);
+            for (size_t j = i + 1; j < rows.size(); ++j) {
+                if (rows[i].sk == rows[j].sk) {
+                    // The pre-existing assumption: one trader platoon, one money.
+                    // (0,0) is "a BF_SHOP counter with no platoon" - not a shop identity.
+                    if (rows[i].sk != CashShop(0, 0)) cashUnion(rows[i].ctr, rows[j].ctr);
+                    continue;
+                }
+                if (pi == g_cashPrev.end() || rows[i].cash == pi->second) continue;
+                std::map<CashCtr, int>::iterator pj = g_cashPrev.find(rows[j].ctr);
+                if (pj == g_cashPrev.end()) continue;
+                // Same old value -> same new value between two scans 400 ms apart.
+                if (pj->second == pi->second && rows[j].cash == rows[i].cash &&
+                    cashUnion(rows[i].ctr, rows[j].ctr))
+                    logCashAlias("lockstep", rows[i].ctr, rows[j].ctr);
+            }
+        }
+        for (size_t i = 0; i < rows.size(); ++i) g_cashPrev[rows[i].ctr] = rows[i].cash;
+        std::set<CashCtr> cashSeen;
+        for (size_t i = 0; i < rows.size(); ++i) {
+            CashCtr root = cashRoot(rows[i].ctr);
+            if (!cashSeen.insert(root).second) continue;
+            // The source's baseline: the most recently set one among its
+            // ShopKeys (they are kept equal below; this only matters while an
+            // alias is first being learned).
+            int rep = -1; unsigned long repMs = 0;
+            for (size_t j = i; j < rows.size(); ++j) {
+                if (cashRoot(rows[j].ctr) != root) continue;
+                if (vendorCashBase_.find(rows[j].sk) == vendorCashBase_.end()) continue;
+                std::map<CashShop, unsigned long>::iterator bm = g_cashBaseMs.find(rows[j].sk);
+                unsigned long ms = (bm != g_cashBaseMs.end()) ? bm->second : 0;
+                if (rep < 0 || ms > repMs) { rep = (int)j; repMs = ms; }
+            }
+            if (rep < 0) continue; // the host never mirrored this money: no baseline
+            const ShopKey sk = rows[rep].sk;
+            const int cash = rows[rep].cash;
+            int d = cash - vendorCashBase_[sk];
+            std::map<ShopKey, std::pair<int, unsigned long> >::iterator cp = vendorCashPend_.find(sk);
+            if (d == 0) {
+                if (cp != vendorCashPend_.end()) vendorCashPend_.erase(cp);
+            } else if (cp == vendorCashPend_.end() || cp->second.first != d) {
+                vendorCashPend_[sk] = std::make_pair(d, now);
+            } else if (now - cp->second.second >= SETTLE_MS) {
+                const CashCtr& kc = rows[rep].ctr;
+                VendorDeltaPacket pkt; memset(&pkt, 0, sizeof(pkt));
+                pkt.type = (u8)PKT_VENDOR_DELTA; pkt.ownerId = ownerId;
+                pkt.deltaId = nextVendorDeltaId_++;
+                pkt.cType = kc.v[0]; pkt.cContainer = kc.v[1]; pkt.cContainerSerial = kc.v[2];
+                pkt.cIndex = kc.v[3]; pkt.cSerial = kc.v[4];
+                pkt.level = GRADE_NA;
+                pkt.cash = d;
+                net.queueVendorDelta(pkt);
+                // Every ShopKey reading this money now stands at the reported value.
+                for (size_t j = i; j < rows.size(); ++j) {
+                    if (cashRoot(rows[j].ctr) != root || rows[j].cash != cash) continue;
+                    if (vendorCashBase_.find(rows[j].sk) == vendorCashBase_.end()) continue;
+                    vendorCashBase_[rows[j].sk] = cash;
+                    g_cashBaseMs[rows[j].sk] = now;
+                    vendorCashPend_.erase(rows[j].sk);
+                }
+                char b[200]; _snprintf(b, sizeof(b) - 1,
+                    "[vendor] CASH SEND id=%u counter=%u,%u,%u,%u,%u delta=%d now=%d",
+                    pkt.deltaId, kc.v[0], kc.v[1], kc.v[2], kc.v[3], kc.v[4], d, cash);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+    }
     for (std::map<Key, InvRecv>::iterator ri = invRecv_.begin(); ri != invRecv_.end(); ++ri) {
         bool shop = ri->second.shop && vendorSync_;
         if (!shop && !deltaMirror(ri->second)) continue; // else: a research bench
@@ -2360,42 +2692,11 @@ void Replicator::detectAndPublishVendorDeltas(GameWorld* gw, NetLink& net, u32 o
         }
         if (engine::resolveObjectByHand(cHand) == 0) continue;
         if (shop) {
-        unsigned int owner[5];
-        if (!engine::readShopCounterOwner(cHand, owner)) continue;
-        ShopKey sk((u32)owner[1], (u32)owner[2]);
-        // The restock gate: this counter's trader platoon, while the mirror is live.
-        if (now - ri->second.recvMs < FRESH_MS) vendorOwners_.insert(sk);
-        // Merchant cash: a settled change against the host's last value is a
-        // trade's cash leg - report it once per shop.
-        std::map<ShopKey, int>::iterator cb = vendorCashBase_.find(sk);
-        if (cb != vendorCashBase_.end() && cashSeen.insert(sk).second) {
-            int cash = -1;
-            if (engine::readShopCash(cHand, &cash) && cash >= 0) {
-                int d = cash - cb->second;
-                std::map<ShopKey, std::pair<int, unsigned long> >::iterator cp = vendorCashPend_.find(sk);
-                if (d == 0) {
-                    if (cp != vendorCashPend_.end()) vendorCashPend_.erase(cp);
-                } else if (cp == vendorCashPend_.end() || cp->second.first != d) {
-                    vendorCashPend_[sk] = std::make_pair(d, now);
-                } else if (now - cp->second.second >= SETTLE_MS) {
-                    VendorDeltaPacket pkt; memset(&pkt, 0, sizeof(pkt));
-                    pkt.type = (u8)PKT_VENDOR_DELTA; pkt.ownerId = ownerId;
-                    pkt.deltaId = nextVendorDeltaId_++;
-                    pkt.cType = k.t; pkt.cContainer = k.c; pkt.cContainerSerial = k.cs;
-                    pkt.cIndex = k.i; pkt.cSerial = k.s;
-                    pkt.level = GRADE_NA;
-                    pkt.cash = d;
-                    net.queueVendorDelta(pkt);
-                    cb->second = cash;
-                    vendorCashPend_.erase(sk);
-                    char b[200]; _snprintf(b, sizeof(b) - 1,
-                        "[vendor] CASH SEND id=%u counter=%u,%u,%u,%u,%u delta=%d now=%d",
-                        pkt.deltaId, k.t, k.c, k.cs, k.i, k.s, d, cash);
-                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
-                }
-            }
+            // The restock gate and the cash leg ran above; a counter whose
+            // owner cannot be read is not diffed (unchanged behaviour).
+            unsigned int owner[5];
+            if (!engine::readShopCounterOwner(cHand, owner)) continue;
         }
-        } // shop
         std::map<Key, std::map<XKey, int> >::iterator bi = vendorBase_.find(k);
         if (bi == vendorBase_.end()) continue; // not applied yet: no baseline to diff
         std::map<XKey, int> cur;
@@ -2513,10 +2814,45 @@ void Replicator::applyVendorDeltas(GameWorld* gw, Inbound& in) {
         if (!bench && p.cash != 0) {
             // The trade's cash leg: the merchant received (bought from) or paid
             // out (sold to) the player on the join's screen; same here.
-            int cur = -1;
-            if (engine::readShopCash(cHand, &cur) && cur >= 0) {
-                int target = cur + p.cash; if (target < 0) target = 0;
-                engine::setShopCash(cHand, target, &cashAfter);
+            // Session 2026-11-18 (2): a join that reads one money through two
+            // counters sent the leg once per counter (ids 18 and 20, same scan)
+            // and both were added. At most one leg per (sender, cash source):
+            // the same amount from the same sender on ANOTHER counter of the
+            // same money within CASH_DUP_MS is that sibling, not a second trade
+            // (a fixed join reports a source once per scan, through one counter;
+            // a real repeat trade needs a fresh 600 ms settle and comes through
+            // the same counter).
+            const unsigned long nowC = nowMs();
+            CashCtr actr = cashCtr(cHand);
+            std::map<std::pair<u32, CashCtr>, CashLeg>::iterator hl =
+                g_cashLegHost.find(std::make_pair(p.ownerId, cashRoot(actr)));
+            if (hl != g_cashLegHost.end() && hl->second.cash == p.cash &&
+                hl->second.ctr != actr && nowC - hl->second.ms < CASH_DUP_MS) {
+                char d[200]; _snprintf(d, sizeof(d) - 1,
+                    "[vendor] CASH DUP-SKIP id=%u from=%u counter=%u,%u,%u,%u,%u cash=%d "
+                    "(same money already credited via %u,%u,%u,%u,%u)",
+                    p.deltaId, p.ownerId, cHand[0], cHand[1], cHand[2], cHand[3], cHand[4],
+                    p.cash, hl->second.ctr.v[0], hl->second.ctr.v[1], hl->second.ctr.v[2],
+                    hl->second.ctr.v[3], hl->second.ctr.v[4]);
+                d[sizeof(d) - 1] = '\0'; coop::logLine(d);
+            } else {
+                int cur = -1;
+                if (engine::readShopCash(cHand, &cur) && cur >= 0) {
+                    int target = cur + p.cash; if (target < 0) target = 0;
+                    // Learn which other census counters read this money: they
+                    // move with our own write.
+                    std::vector<CashRow> pre;
+                    if (target != cur) collectCensusCash(censusShops_, pre);
+                    engine::setShopCash(cHand, target, &cashAfter);
+                    learnWriteAliases(actr, cur, cashAfter, pre);
+                    CashLeg leg; leg.ctr = actr; leg.cash = p.cash; leg.ms = nowC;
+                    g_cashLegHost[std::make_pair(p.ownerId, cashRoot(actr))] = leg;
+                }
+            }
+            // Expire old legs (the map is keyed per sender + source: small).
+            for (std::map<std::pair<u32, CashCtr>, CashLeg>::iterator e = g_cashLegHost.begin();
+                 e != g_cashLegHost.end(); ) {
+                if (nowC - e->second.ms >= CASH_DUP_MS) g_cashLegHost.erase(e++); else ++e;
             }
         }
         char b[256];
@@ -2605,15 +2941,39 @@ void Replicator::applyVendorCash(GameWorld* gw, Inbound& in) {
             coop::logLine("[vendor] cash defer-expired (unreported local change; applying)");
         }
         int after = cur;
+        const CashCtr actr = cashCtr(cHand);
         if (cur != c.cash) {
+            // Session 2026-11-18 (2): note which other mirrored counters move
+            // with this write - they read the same money.
+            std::vector<CashRow> pre;
+            collectRecvCash(invRecv_, pre);
             engine::setShopCash(cHand, c.cash, &after);
+            learnWriteAliases(actr, cur, after, pre);
             char b[176]; _snprintf(b, sizeof(b) - 1,
                 "[vendor] CASH APPLY counter=%u,%u,%u,%u,%u cash=%d was=%d now=%d",
                 cHand[0], cHand[1], cHand[2], cHand[3], cHand[4], c.cash, cur, after);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
         vendorCashBase_[ci->first] = c.cash;
+        g_cashBaseMs[ci->first] = now;
         vendorCashPend_.erase(ci->first);
+        // Session 2026-11-18 (2): rebase EVERY ShopKey that reads this money, not
+        // just the mirrored counter's. Leaving a sibling ShopKey on its old
+        // baseline made it report the host's own value back as a trade (join
+        // CASH APPLY 489 was=1325 -> CASH SEND 1725 delta=1325, every mirror).
+        // Only siblings that now read exactly the host's value are rebased.
+        {
+            const CashCtr aroot = cashRoot(actr);
+            std::vector<CashRow> post;
+            collectRecvCash(invRecv_, post);
+            for (size_t j = 0; j < post.size(); ++j) {
+                if (post[j].sk == ci->first || post[j].cash != c.cash) continue;
+                if (cashRoot(post[j].ctr) != aroot) continue;
+                vendorCashBase_[post[j].sk] = c.cash;
+                g_cashBaseMs[post[j].sk] = now;
+                vendorCashPend_.erase(post[j].sk);
+            }
+        }
         vendorCashIn_.erase(ci++);
     }
 }
@@ -2698,11 +3058,35 @@ void Replicator::sendTradeOp(NetLink& net, u8 op, u32 me, const Key& k, u32 hold
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
 }
 
+// A merchant that is a proxy on one client has a local hand only that client
+// has seen, and the trade plane was the one channel that put raw local hands on
+// the wire. Session 2026-11-18: the join held the "lock" on 1,124,.. while the
+// host traded with the same merchant as 1,47,.. - the lock excluded nobody and
+// the host's stock/money table never landed on the join. Translate at the engine
+// boundary; holders and tables stay keyed by the stream key.
+Replicator::Key Replicator::tradeWireKey(const unsigned int th[5]) const {
+    Key k; k.t = th[0]; k.c = th[1]; k.cs = th[2]; k.i = th[3]; k.s = th[4];
+    Character* c = engine::resolveCharByHand(th[3], th[4], th[0], th[1], th[2]);
+    Key w;
+    if (c && wireKeyOf(c, &w)) return w;
+    return k;
+}
+
+void Replicator::tradeLocalHand(const Key& k, unsigned int th[5]) const {
+    th[0] = k.t; th[1] = k.c; th[2] = k.cs; th[3] = k.i; th[4] = k.s;
+    bool viaProxy = false;
+    Character* c = bodyForKey(k, &viaProxy, 0);
+    unsigned int h[5];
+    if (c && viaProxy && engine::readObjectHand(reinterpret_cast<RootObject*>(c), h))
+        for (int i = 0; i < 5; ++i) th[i] = h[i];
+}
+
 bool Replicator::applyTradeTable(GameWorld* gw, const Key& k, const char* why) {
     std::map<Key, TradeTable>::iterator ti = tradeTable_.find(k);
     if (ti == tradeTable_.end()) return true;
     TradeTable& t = ti->second;
-    unsigned int th[5] = { k.t, k.c, k.cs, k.i, k.s };
+    unsigned int th[5];
+    tradeLocalHand(k, th);
     InvItemEntry cur[INV_ITEMS_MAX];
     bool trunc = false;
     int money = -1;
@@ -2864,7 +3248,9 @@ void Replicator::tickTradeLock(GameWorld* gw, Inbound& in, NetLink& net, u32 me,
     // 3. The local trade window: session snapshots, open / close edges.
     unsigned int th[5];
     bool open = engine::localTradeTarget(th);
-    Key k; k.t = th[0]; k.c = th[1]; k.cs = th[2]; k.i = th[3]; k.s = th[4];
+    // The trade plane names a merchant by its STREAM key; th stays LOCAL for the
+    // engine reads below.
+    Key k = tradeWireKey(th);
     bool same = open && tradeOpen_ && !(tradeOpenKey_ < k) && !(k < tradeOpenKey_);
     if (same) {
         // The shop is only reachable while its window is open: the first read is

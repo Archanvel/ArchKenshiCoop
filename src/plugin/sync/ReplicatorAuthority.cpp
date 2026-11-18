@@ -283,6 +283,25 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
     if (censusFresh)
         wn = engine::listNpcsWide(gw, censusRadius_, wChars, wStates, NPC_CENSUS_MAX,
                                   &wideTrunc);
+    // Cell hand-over grace. When a cell changes author, the NEW author's census
+    // and stream for it have not arrived yet - but its census is "fresh" by
+    // receive time (it has been sending an empty one every second), and the
+    // suppress debounce is counted in FRAMES (75 = 0.8 s at 94 fps, under one
+    // census period). So every local body in the cell read as census-absent and
+    // unstreamed and a whole town was hidden for 0.2-1.8 s, losing its tasks
+    // (session 2026-11-16 20:58:03: 24 suppressed + 9 culled 0.8 s after a
+    // [cell] RECV, all restored within two seconds). Silence right after a
+    // hand-over is not absence: hold new suppressions for a few seconds.
+    const unsigned long CELL_HANDOVER_GRACE_MS = 3000;
+    const bool handoverGrace = cellAuth_ && cellMapChangeMs_ != 0 &&
+                               (nowE - cellMapChangeMs_) < CELL_HANDOVER_GRACE_MS;
+    if (handoverGrace) {
+        static unsigned long s_graceLogMs = 0; // main thread only
+        if (s_graceLogMs != cellMapChangeMs_) {
+            s_graceLogMs = cellMapChangeMs_;
+            coop::logLine("[cell] handover grace 3000ms (suppression held; census/stream catching up)");
+        }
+    }
 
     // Phase 0.5: account the time wide culling spends DISABLED. Staleness is a
     // deliberate fail-open (a silent host must not mass-suppress a loaded area),
@@ -458,6 +477,12 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
             ac.unstreamed = 0;
             continue;
         }
+        // Hand-over grace: an already-suppressed body stays as it is; a body not
+        // yet suppressed does not start (or continue) counting toward it.
+        if (!exists && handoverGrace && s == suppressed_.end()) {
+            ac.unstreamed = 0;
+            continue;
+        }
         if (exists) { ac.unstreamed = 0; if (ac.streamed < 1000000u) ++ac.streamed; }
         else        { ac.streamed = 0;   if (ac.unstreamed < 1000000u) ++ac.unstreamed; }
         if (exists) {
@@ -588,6 +613,10 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
             if (!exists && !observedAt(k, attnAnch, nAttnAnch,
                                        wStates[i].x, wStates[i].y, wStates[i].z)) {
                 ac.unstreamed = 0;
+                continue;
+            }
+            if (!exists && handoverGrace && s == suppressed_.end()) {
+                ac.unstreamed = 0; // hand-over grace, as in the near pass
                 continue;
             }
             if (exists) { ac.unstreamed = 0; if (ac.streamed < 1000000u) ++ac.streamed; }
@@ -1328,6 +1357,36 @@ bool Replicator::authorHoldsBody(GameWorld* gw, u32 localId, const Key& k,
     return true;
 }
 
+namespace {
+// A squad tab rank has exactly one owner, so a claim for (owner, rank) retires
+// any slot ANOTHER player holds for that rank. Without this a slot outlives the
+// hand-back of a tab: the host inherits a leaver's tab and claims for it, the
+// join returns and takes the tab back, and the host's (0, rank) slot is never
+// refreshed and never erased. The returning join never saw that claim, so the
+// two clients resolve different cell maps from then on - each authors what the
+// other also authors and rejects the other's census rows as off-cell ("I see
+// people he doesn't, he sees people I don't", until restart). Session
+// 2026-11-16: slots=3 with two players and two tabs after the reconnect.
+template <class SlotMap>
+bool retireRankSlots(SlotMap& slots, u32 rank, u32 keepOwner) {
+    bool any = false;
+    for (typename SlotMap::iterator o = slots.begin(); o != slots.end(); ) {
+        if (o->first.second == rank && o->first.first != keepOwner) {
+            char rb[144]; _snprintf(rb, sizeof(rb) - 1,
+                "[cell] RETIRE owner=%u rank=%u cell=%d,%d (rank now claimed by %u)",
+                (unsigned)o->first.first, (unsigned)o->first.second,
+                o->second.cx, o->second.cz, (unsigned)keepOwner);
+            rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+            slots.erase(o++);
+            any = true;
+        } else {
+            ++o;
+        }
+    }
+    return any;
+}
+} // namespace
+
 void Replicator::syncCellClaims(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId) {
     // Drain unconditionally: with the feature off the queue must still not grow
     // (a peer running with it on would otherwise back up against us forever).
@@ -1356,6 +1415,7 @@ void Replicator::syncCellClaims(GameWorld* gw, Inbound& in, NetLink& net, u32 ow
         CellClaim cc;
         cc.cx = p.cellX; cc.cz = p.cellY; cc.seq = p.seq; cc.recvMs = now;
         claimSlots_[slot] = cc;
+        if (retireRankSlots(claimSlots_, p.tabRank, p.ownerId)) changed = true;
         if (moved) {
             changed = true;
             char b[128]; _snprintf(b, sizeof(b) - 1,
@@ -1439,6 +1499,7 @@ void Replicator::syncCellClaims(GameWorld* gw, Inbound& in, NetLink& net, u32 ow
             CellClaim cc;
             cc.cx = cx; cc.cz = cz; cc.seq = seq; cc.recvMs = now;
             claimSlots_[slot] = cc;
+            if (retireRankSlots(claimSlots_, (u32)rank, ownerId)) changed = true;
             if (!same) {
                 changed = true;
                 char b[144]; _snprintf(b, sizeof(b) - 1,
@@ -1449,7 +1510,10 @@ void Replicator::syncCellClaims(GameWorld* gw, Inbound& in, NetLink& net, u32 ow
         }
     }
 
-    if (changed) rebuildClaimedCells();
+    if (changed) {
+        rebuildClaimedCells();
+        cellMapChangeMs_ = (now != 0) ? now : 1; // opens the hand-over grace
+    }
     // Dump the resolved map on change AND on a slow cadence. split_far2's
     // central claim - that both clients resolve the SAME owner for the same
     // cell - can only be read by diffing the two logs, so the line has to
@@ -1610,10 +1674,42 @@ void Replicator::reconcileProxy(Character* c, const EntityState& st,
     // [census] FREEZE - AI suspend + haltMovement every tick - on proxies that
     // were streamed=1 and being walked by the drive the whole fight). The
     // exemption this exists for is the UNSTREAMED proxy, which still lands here.
-    if (drivenChars_.find(c) != drivenChars_.end()) return;
+    const unsigned long nowO = nowMs();
+    if (drivenChars_.find(c) != drivenChars_.end()) {
+        proxyOrphanMs_.erase(pk->second);
+        return;
+    }
     float drift = parkDivergedCopy(c, st, pk->second);
     if (censusFreezeAi_ && drift >= 0.0f)
         censusFreezeDivergedAi(c, pk->second, drift);
+    // Orphan proxy: its author neither streams it nor lists it in the census.
+    // Nothing else bounds it (proxies are exempt from suppression, and the park
+    // above needs a census row), so its LOCAL AI ran free: in the 2026-11-18
+    // session three minted bandits ran 2400-4100 u from where the host held
+    // them, attacked and KO'd the join's character, and "vanished" when a census
+    // row finally parked them back - while the host saw them standing still.
+    // Hold it where it is until a row or a stream sample returns.
+    const bool censusLive = censusRecvMs_ != 0 &&
+                            (nowO - censusRecvMs_) <= (unsigned long)CENSUS_FRESH_MS;
+    if (!cellAuth_ && censusFreezeAi_ && censusLive &&
+        censusPos_.find(pk->second) == censusPos_.end() &&
+        !censusVouches(pk->second, nowO)) {
+        std::map<Key, unsigned long>::iterator om = proxyOrphanMs_.find(pk->second);
+        if (om == proxyOrphanMs_.end()) { proxyOrphanMs_[pk->second] = nowO; return; }
+        if ((nowO - om->second) < 3000) return;      // debounce: mint/census races
+        engine::addAiSuspend(c);
+        engine::haltMovement(c);
+        static unsigned long s_orphLog = 0;          // main thread only
+        if ((nowO - s_orphLog) >= 1000) {
+            s_orphLog = nowO;
+            char b[160]; _snprintf(b, sizeof(b) - 1,
+                "[proxy] ORPHAN hold hand=%u,%u (no census row, no stream for %lums)",
+                (unsigned)pk->second.i, (unsigned)pk->second.s, nowO - om->second);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    } else {
+        proxyOrphanMs_.erase(pk->second);
+    }
 }
 
 float Replicator::parkDivergedCopy(Character* c, const EntityState& st, const Key& k) {
@@ -1694,7 +1790,11 @@ float Replicator::parkDivergedCopy(Character* c, const EntityState& st, const Ke
     // (measured 500-900 u), where there is nothing to converge to on foot: it
     // would spend a minute walking a route its counterpart never took, through
     // whatever lies between. Past the band ceiling, jump.
-    if (censusWalkDist_ > 0.0f && d <= censusWalkDist_) {
+    // A ragdoll (corpse, KO'd body) cannot walk: the order does nothing and only
+    // resets the futile streak. Straight to the re-placement below.
+    const bool ragdoll = (engine::readBodyState(c) & BODY_RAGDOLL) != 0 &&
+                         engine::ragdollMoveEnabled();
+    if (!ragdoll && censusWalkDist_ > 0.0f && d <= censusWalkDist_) {
         CensusFix& f = censusFix_[k];
         // What the counterpart is doing, from the step between the last two
         // census rows OF THE AUTHOR THAT LISTS IT - the only thing we can know
@@ -1845,7 +1945,19 @@ float Replicator::parkDivergedCopy(Character* c, const EntityState& st, const Ke
             k.i, k.s, nm, lfr.kind, d);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
-    if (engine::park(c, it->second.x, it->second.y, it->second.z, st.heading)) {
+    // park() writes the movement controller, which a ragdoll ignores (every
+    // corpse park in the 2026-11-18 sessions ended FUTILE); move the ragdoll.
+    bool placed = ragdoll
+        ? engine::moveRagdollBody(c, it->second.x, it->second.y, it->second.z)
+        : engine::park(c, it->second.x, it->second.y, it->second.z, st.heading);
+    if (ragdoll) {
+        char nm[48]; engine::charName(c, nm, sizeof(nm));
+        char b[176]; _snprintf(b, sizeof(b) - 1,
+            "[census] ragdoll MOVE hand=%u,%u name='%s' ok=%d d=%.0f",
+            k.i, k.s, nm, placed ? 1 : 0, d);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+    if (placed) {
         ++censusParks_;
         static unsigned long logTick = 0; // main-thread only, ~4 lines/s
         unsigned long now = nowMs();

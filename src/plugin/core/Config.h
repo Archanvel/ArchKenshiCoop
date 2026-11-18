@@ -17,6 +17,7 @@ struct Config {
     int           port;            // KENSHICOOP_PORT
     std::string   save;            // KENSHICOOP_SAVE (auto-load; empty = manual)
     int           testSeconds;     // KENSHICOOP_TEST_SECONDS (0 = no self-exit)
+    int           testLobbyRole;   // KENSHICOOP_TEST_LOBBY: 0 off, 1 host, 2 join via coopUiConnect
     std::string   logPath;         // KENSHICOOP_LOG
     std::string   scenario;        // KENSHICOOP_SCENARIO (empty = normal tick)
     unsigned long autoLoadDelayMs; // KENSHICOOP_AUTOLOAD_DELAY_MS
@@ -315,6 +316,31 @@ struct Config {
     // scenario that measures combat must leave it set, because the cap is what
     // lets a fight resolve at a watchable rate.
     bool          speedCombatCap;
+
+    // WHO decides the session's speed (coop_config.json "speedPolicy" /
+    // KENSHICOOP_SPEED_POLICY; HOST-side setting, the join just follows):
+    //   0 "min"  - consensus, the original behaviour: everyone must raise.
+    //   1 "last" - the most recent click by ANY player sets the speed for all.
+    //   2 "host" - the host's buttons set the speed; joins can only pause.
+    // Pause is the same under every policy: anyone can pause, and the world
+    // resumes only when nobody holds a pause.
+    int           speedPolicy;
+
+    // HOST: keep the world paused while a join that just connected is still
+    // loading in (coop_config.json "pauseWhileJoining" /
+    // KENSHICOOP_JOIN_LOAD_PAUSE; default ON for real sessions, OFF under a
+    // scripted scenario so harness timings are unchanged). See
+    // Replicator::setJoinLoadPause.
+    bool          joinLoadPause;
+
+    // Healing-rate multiplier for player-squad characters (coop_config.json
+    // "healMult" / KENSHICOOP_HEAL_MULT; 1 = vanilla, clamped to [0.1, 20]).
+    // Scales only the two heal factors the engine passes to each body part's
+    // update - bleeding, hunger, degeneration and the clock are untouched.
+    // Each machine applies its own value to the squads it simulates, and the
+    // owner-authoritative vitals stream carries the result to the peer, so the
+    // players should set the same number.
+    float         healMult;
 
     // KENSHICOOP_TRACK_MOVE=1 (DEFAULT OFF): log-only 1 Hz position track, one
     // line per player squad tab. Gates nothing. Used to RECORD a walked route at

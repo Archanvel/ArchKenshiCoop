@@ -1113,7 +1113,16 @@ function Test-DeathOrder {
     # original oracle predated the actor field and anchored 'hand=([\d,]+?) bs',
     # which stopped matching when combat attribution added ' actor=..' - a silent
     # oracle rot found by the re-validation audit. Greedy digits/commas is enough.
-    $send = Select-String -Path $HostFile -Pattern '\[(\d\d):(\d\d):(\d\d)\.(\d\d\d)\].*\[event\] SEND id=\d+ ev=2 hand=([\d,]+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+    # Judge the death the scenario CAUSED: the first ev=2 SEND after the
+    # "SCENARIO DEATH issued" line. The first one in the log can be a save-dead
+    # corpse baselined at load, before the join was connected - it only used to
+    # reach the join because the host re-sent corpse deaths every 60 s (a bug,
+    # fixed in 0.59.1-fix8), so this gate passed or failed by timing.
+    $allSend = @(Select-String -Path $HostFile -Pattern '\[(\d\d):(\d\d):(\d\d)\.(\d\d\d)\].*\[event\] SEND id=\d+ ev=2 hand=([\d,]+)' -ErrorAction SilentlyContinue)
+    $issued  = Select-String -Path $HostFile -Pattern 'SCENARIO DEATH issued' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $send = $null
+    if ($null -ne $issued) { $send = $allSend | Where-Object { $_.LineNumber -gt $issued.LineNumber } | Select-Object -First 1 }
+    if ($null -eq $send) { $send = $allSend | Select-Object -First 1 }
     if ($null -eq $send) { Write-Host "  DEATH-ORDER FAIL - host emitted no death event (ev=2)"; return (Add-GateResult -Name "death_order" -Status FAIL -Detail "no EVT_DEATH sent") }
     $hand = $send.Matches[0].Groups[5].Value
     $sendT = Convert-StampToMs -Groups $send.Matches[0].Groups -OffsetMs (Get-LogClockOffsetMs -File $HostFile)

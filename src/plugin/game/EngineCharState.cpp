@@ -581,7 +581,14 @@ bool enterFurnitureNearPos(GameWorld* gw, Character* occupant, int kind,
             if (!o) continue;
             GameData* gd = o->getGameData();
             if (!gd) continue;
-            bool match = false;
+            // Match by building FUNCTION first: GameData names are localised
+            // (session 2026-11-18 (2): on a Russian install every bed re-seat
+            // failed because no building name contained "bed"). Names stay as
+            // the fallback for cages/poles whose function is not BF_CAGE.
+            int bfn = (int)static_cast<Building*>(o)->getSpecialFunction();
+            bool match = (kind == 1)
+                ? (bfn == (int)BF_BED || bfn == (int)BF_SKELETON_BED)
+                : (bfn == (int)BF_CAGE);
             for (unsigned int k = 0; k < nprefs && !match; ++k)
                 if (ciContains(gd->name.c_str(), prefs[k])) match = true;
             if (!match) continue;
@@ -817,6 +824,69 @@ bool installSpeedIntentHooks(GameWorld* gw) {
     if (KenshiLib::AddHook(aToggle, (void*)&togglePause_hook,
                            (void**)&g_togglePauseOrig) != KenshiLib::SUCCESS)
         return false;
+    return true;
+}
+
+void adoptSpeedVote(float mult) {
+    // Speed policy "last"/"host": the session's speed was set by someone else,
+    // and this player's remembered request follows it. Only the multiplier the
+    // engine model keeps across a pause moves; the pause flag and the button
+    // snapshot are the player's own and stay as they are.
+    if (mult > 0.0f) g_speedIntentMult = mult;
+}
+
+// ---- Healing-rate multiplier -------------------------------------------------
+// MedicalSystem::HealthPartStatus::update(frameTIME, healMultFlesh,
+// healMultRobot, degenerationRate, _age, robotWear) is the per-part tick the
+// engine heals in; the two healMult arguments are the factors it already
+// applies for beds, skill and race. Scaling just those two leaves bleeding,
+// degeneration, hunger and the clock alone - "heal faster" without "time runs
+// faster". Player-squad bodies only (Character::isPlayerCharacter): a world
+// NPC's medical model runs locally on each machine, and speeding it on one
+// side would desync who is still standing.
+typedef bool (__fastcall* PartUpdateFn)(MedicalSystem::HealthPartStatus* self,
+                                        float frameTime, float healMultFlesh,
+                                        float healMultRobot, float degenerationRate,
+                                        float age, float robotWear);
+static PartUpdateFn g_partUpdateOrig   = 0;
+static float        g_healMult         = 1.0f;
+static bool         g_healHookInstalled = false;
+
+static bool healBoosted(MedicalSystem::HealthPartStatus* self) {
+    __try {
+        Character* c = self ? self->me : 0;
+        return c != 0 && c->isPlayerCharacter();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool __fastcall partUpdate_hook(MedicalSystem::HealthPartStatus* self,
+                                       float frameTime, float healMultFlesh,
+                                       float healMultRobot, float degenerationRate,
+                                       float age, float robotWear) {
+    const float m = g_healMult;
+    if ((m > 1.001f || m < 0.999f) && healBoosted(self)) {
+        healMultFlesh *= m;
+        healMultRobot *= m;
+    }
+    return g_partUpdateOrig(self, frameTime, healMultFlesh, healMultRobot,
+                            degenerationRate, age, robotWear);
+}
+
+void setHealMult(float mult) {
+    if (!(mult > 0.0f)) mult = 1.0f;
+    g_healMult = mult;
+}
+
+bool installHealHook() {
+    if (g_healHookInstalled) return true; // gameplay can start more than once
+    intptr_t addr = KenshiLib::GetRealAddress(&MedicalSystem::HealthPartStatus::update);
+    if (!addr) return false;
+    if (KenshiLib::AddHook(addr, (void*)&partUpdate_hook,
+                           (void**)&g_partUpdateOrig) != KenshiLib::SUCCESS)
+        return false;
+    g_healHookInstalled = true;
     return true;
 }
 

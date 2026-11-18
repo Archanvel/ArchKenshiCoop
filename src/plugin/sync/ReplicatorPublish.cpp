@@ -630,7 +630,29 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
                 // Skipping WITHOUT consuming quota lets the scan reach past
                 // parked bodies, so a lone approaching raid effectively
                 // streams at near-full rate while a busy field shares ~2 Hz.
-                if (buf[n].cMoving == 0 && buf[n].cSpeed <= 0.25f) continue;
+                if (buf[n].cMoving == 0 && buf[n].cSpeed <= 0.25f) {
+                    // ...but a resting body can still have STATE to deliver. A
+                    // knocked-out body is stationary by definition, so "movers
+                    // only" dropped it from the stream the moment it came to
+                    // rest: the KO edge (detected from this buffer) went out
+                    // late or never, the down state was not streamed, and the
+                    // peer's copy stood there upright. The stand-up edge was
+                    // hidden the same way. Session 2026-11-16: six bandits read
+                    // unconscious in their medical packets 17-103 s before their
+                    // KO event was sent, and not one NPC revive all session.
+                    // Keep a resting body while it is down-but-alive or carried,
+                    // and for the one row that carries a down/up/death edge
+                    // against what we last published. (Corpses and cages stay
+                    // out: that is the cost the gate exists to avoid.)
+                    std::map<Key, HostBody>::const_iterator hbi = hostBody_.find(mw);
+                    const u16 was = (hbi != hostBody_.end()) ? hbi->second.bs : 0;
+                    const u16 cur = buf[n].bodyState;
+                    const bool edge = coop::bodyIsDown(was) != coop::bodyIsDown(cur) ||
+                                      ((was ^ cur) & BODY_DEAD) != 0;
+                    const bool held = (coop::bodyIsDown(cur) && !(cur & BODY_DEAD)) ||
+                                      coop::bodyIsCarried(cur);
+                    if (!edge && !held) continue;
+                }
                 ++n;
                 ++added;
             }
@@ -1015,7 +1037,14 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
     // (prev=0) - and a re-baselined DOWN body re-emits at most one KO edge.
     const unsigned long HOSTBODY_STALE_MS = 60000;
     for (std::map<Key, HostBody>::iterator hit = hostBody_.begin(); hit != hostBody_.end(); ) {
-        if (nowPub - hit->second.seenMs > HOSTBODY_STALE_MS) hostBody_.erase(hit++);
+        // A corpse rests OUT of the stream by design, so its entry always goes
+        // stale; pruning it re-baselined prev=0 and the next mid-band rotation
+        // re-emitted EVT_DEATH (bs 0->2055) under a fresh event id every 60 s
+        // (session 2026-11-18: 8 death events for one beak thing). Keep the
+        // entries of dead bodies far longer.
+        const unsigned long keepMs = (hit->second.bs & BODY_DEAD) ? 30UL * 60UL * 1000UL
+                                                                  : HOSTBODY_STALE_MS;
+        if (nowPub - hit->second.seenMs > keepMs) hostBody_.erase(hit++);
         else ++hit;
     }
 }

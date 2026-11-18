@@ -256,6 +256,7 @@ void Replicator::applyTargets(GameWorld* gw) {
                 it->first.t, it->first.c, it->first.cs, it->first.i,
                 it->first.s, (void*)(sp != proxyByKey_.end() ? sp->second : 0));
             sb[sizeof(sb) - 1] = '\0'; coop::logLine(sb);
+            if (sp != proxyByKey_.end()) mintedBodies_.erase(sp->second); // dead pointer
             proxyByKey_.erase(it->first);
             spawnReq_.erase(it->first);   // allow a fresh REQ/mint cycle
             lifeSet(it->first, LIFE_UNKNOWN, "drive-stale");
@@ -424,7 +425,7 @@ void Replicator::applyTargets(GameWorld* gw) {
         // may only take hold on the peer via the owner's reliable EVT_DEATH.
         if (dmgGuard_ && !(out.bodyState & BODY_DEAD) && !d.deathLatched &&
             (engine::readBodyState(c) & BODY_DEAD)) {
-            if (engine::vetoLocalDeath(c)) {
+            if (engine::vetoLocalDeath(c, coop::bodyIsDown(out.bodyState) || d.koLatched)) {
                 char b[128]; _snprintf(b, sizeof(b) - 1,
                     "[death] veto hand=%u,%u", out.hIndex, out.hSerial);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
@@ -551,6 +552,28 @@ void Replicator::applyTargets(GameWorld* gw) {
         // the down path AND all locomotion driving for it this tick. koLatched is
         // deliberately NOT cleared: the body is still KO'd, and the hold re-engages
         // the tick after the local drop releases it.
+        //
+        // Level repair for a LOST EVT_REVIVE. The latch above is edge-only: it is
+        // cleared by the revive event and nothing else. But the sender forgets a
+        // body's baseline after 60 s out of its stream, so one that woke up while
+        // unstreamed comes back with no edge to send, and a revive can also be
+        // dropped by the latch-skip - the copy then stayed knocked down for good,
+        // lying there and sliding along after its owner. Three seconds of FRESH
+        // upright samples is not a dropped batch: release. Death stays latched.
+        if (d.koLatched && !d.deathLatched) {
+            if (!d.fresh || coop::bodyIsDown(out.bodyState) ||
+                coop::bodyIsCarried(out.bodyState)) {
+                d.koUpTick = 0;
+            } else if (d.koUpTick == 0) {
+                d.koUpTick = (now != 0) ? now : 1;
+            } else if ((now - d.koUpTick) >= 3000) {
+                d.koLatched = false; d.koUpTick = 0;
+                char kb[128]; _snprintf(kb, sizeof(kb) - 1,
+                    "[event] KO-LATCH release hand=%u,%u (stream upright 3000ms, no REVIVE)",
+                    out.hIndex, out.hSerial);
+                kb[sizeof(kb) - 1] = '\0'; coop::logLine(kb);
+            }
+        }
         if (carrySync_) {
             engine::CarryRead lcr;
             bool locallyCarried = engine::readCarry(c, &lcr) && lcr.beingCarried;
@@ -587,6 +610,18 @@ void Replicator::applyTargets(GameWorld* gw) {
                 // rebuilt every tick, so it releases the moment the stream stops
                 // reporting the body as carried.
                 if (aiSuspend_) engine::addAiSuspend(c);
+                // The down hold below does not run on the shoulder, so the
+                // copy's KO timer counts down from whatever it last showed. Since
+                // that mirrors the owner's countdown (protocol 67) it can be a
+                // few seconds, and the passenger woke up mid-carry (npc_carry run
+                // 20261118_065901). Keep an unconscious passenger's timer topped
+                // up while carried - a timer write only, no re-collapse.
+                if (coop::bodyIsDown(out.bodyState) || d.koLatched || d.carriedDown) {
+                    engine::MedicalRead pm;
+                    if (engine::readMedical(c, &pm) && pm.valid && pm.unconscious &&
+                        pm.koTimer >= 0.0f && pm.koTimer < 3.0f)
+                        engine::holdDown(c, 8.0f);
+                }
                 d.parked = false; d.haveDest = false;
                 if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
                 continue;
@@ -787,6 +822,10 @@ void Replicator::applyTargets(GameWorld* gw) {
                 }
             } else if (streamKind != 0) {
                 d.furnNoSeeTick = 0;
+                if (haveFr && localKind == streamKind && (localKind == 1 || localKind == 2)) {
+                    for (int fi = 0; fi < 5; ++fi) d.furnHand[fi] = lfr.furn[fi];
+                    d.furnHandKind = localKind;
+                }
                 // A jailed/bedded DRIVEN body must not run its own decision layer.
                 // A CONSCIOUS caged squad member (an arrested player) otherwise
                 // "releases from jail", fights the guards and walks out of the cage
@@ -798,6 +837,15 @@ void Replicator::applyTargets(GameWorld* gw) {
                 // rebuilt every drive tick, so this self-clears the moment the host
                 // stops streaming the furniture bit (body released) and its AI resumes.
                 if (aiSuspend_) engine::addAiSuspend(c);
+                // Same as the carried carve-out: an unconscious occupant's KO
+                // timer is not refreshed here, and a copy that wakes in bed is
+                // walked out of it by the engine (GET_OUT_OF_BED).
+                if (coop::bodyIsDown(out.bodyState) || d.koLatched) {
+                    engine::MedicalRead pm;
+                    if (engine::readMedical(c, &pm) && pm.valid && pm.unconscious &&
+                        pm.koTimer >= 0.0f && pm.koTimer < 3.0f)
+                        engine::holdDown(c, 8.0f);
+                }
                 if (haveFr && localKind != streamKind &&
                     (now - d.furnHealTick) >= FURN_HEAL_MS) {
                     d.furnHealTick = now;
@@ -815,8 +863,10 @@ void Replicator::applyTargets(GameWorld* gw) {
                         ? (d.haveChainOwner
                            ? engine::applyFurniture(gw, c, d.chainOwner, 3, true)
                            : engine::applyFurniture(gw, c, 0, 3, true))
-                        : engine::enterFurnitureNearPos(
-                            gw, c, streamKind, out.x, out.y, out.z, FURN_MATCH_DIST);
+                        : ((d.furnHandKind == streamKind &&
+                            engine::applyFurniture(gw, c, d.furnHand, streamKind, true)) ||
+                           engine::enterFurnitureNearPos(
+                               gw, c, streamKind, out.x, out.y, out.z, FURN_MATCH_DIST));
                     // Drop the in-progress escape/attack action so the body doesn't
                     // finish breaking out before the suspend takes hold. endAction is
                     // SEH-guarded (same call the rest-park path uses).
@@ -864,6 +914,7 @@ void Replicator::applyTargets(GameWorld* gw) {
                 bool ok = engine::applyFurniture(gw, c, lfr.furn, 1, false);
                 engine::endAction(c);
                 d.furnNoSeeTick = 0;
+                d.furnHandKind = 0;
                 d.taskApplied = false; d.issuedTask = TASK_NONE; d.taskNoneTick = 0;
                 char bfe[160]; _snprintf(bfe, sizeof(bfe) - 1,
                     "[furn] BED FAST-EXIT occ=%u,%u ok=%d hostMoving=1",
@@ -914,6 +965,10 @@ void Replicator::applyTargets(GameWorld* gw) {
                     }
                     downish = false;
                 }
+                if (localKind == 1 || localKind == 2) {
+                    for (int fi = 0; fi < 5; ++fi) d.furnHand[fi] = lfr.furn[fi];
+                    d.furnHandKind = localKind;
+                }
                 if (streamNpcs_ && isSquad && downish) {
                     // Not ours to author: another world authority is (or will
                     // be) sending it, so only HOLD the self-heal exit below.
@@ -944,6 +999,7 @@ void Replicator::applyTargets(GameWorld* gw) {
             } else {
                 d.furnNoSeeTick = 0;
                 d.furnPeerUpTick = 0;
+                d.furnHandKind = 0; // out of furniture on both sides
             }
         }
         // ---- Crawl carve-out (protocol 53) -------------------------------------
@@ -974,14 +1030,66 @@ void Replicator::applyTargets(GameWorld* gw) {
             (coop::bodyIsDown(out.bodyState) || d.deathLatched || d.koLatched ||
              d.carriedDown)) {
             unsigned short localBs = engine::readBodyState(c);
+            // The KO timer is what the game shows as the countdown: keep the
+            // OWNER's remaining time (counted down since its last vitals packet)
+            // rather than a constant 8 s. A dead body or one without a known
+            // countdown keeps the old 8 s pin.
+            float holdSec = 8.0f;
+            if (!d.deathLatched && !(out.bodyState & BODY_DEAD)) {
+                Key mk; mk.t = out.hType; mk.c = out.hContainer; mk.cs = out.hContainerSerial;
+                mk.i = out.hIndex; mk.s = out.hSerial;
+                std::map<Key, MedRecv>::const_iterator mr = medRecv_.find(mk);
+                if (mr != medRecv_.end() && mr->second.koRecvMs != 0 &&
+                    (now - mr->second.koRecvMs) < 15000) {
+                    holdSec = mr->second.koTimer -
+                              (float)(now - mr->second.koRecvMs) / 1000.0f;
+                    static unsigned long s_koLog = 0; // main thread only
+                    if ((now - s_koLog) >= 2000) {
+                        s_koLog = now;
+                        char kb[128]; _snprintf(kb, sizeof(kb) - 1,
+                            "[down] ko countdown hand=%u,%u left=%.1fs (owner %.1fs)",
+                            out.hIndex, out.hSerial, holdSec, mr->second.koTimer);
+                        kb[sizeof(kb) - 1] = '\0'; coop::logLine(kb);
+                    }
+                }
+            }
             if (!coop::bodyIsDown(localBs)) engine::knockDown(c, true);
-            else                          { engine::holdDown(c); d.carriedDown = false; }
+            else                          { engine::holdDown(c, holdSec); d.carriedDown = false; }
             // A ragdoll/KO falls independently on each client (and the join's local
             // AI may have walked the body elsewhere before the down state arrived),
             // so co-locate it with the host's down position when it has drifted.
             // Teleport (not walk) - a limp body has no gait to preserve.
-            if (haveActual && dist3(ax, ay, az, out.x, out.y, out.z) > 2.0f)
+            //
+            // A RAGDOLLED body ignores that teleport: it writes the movement
+            // controller, and the corpse the player sees and loots is the physics
+            // ragdoll (ragdoll_move_probe 2026-11-18: dPos=0 dRoot=0, for ever).
+            // That is the field report "the corpse lies a few metres apart". Re-
+            // place the ragdoll itself, horizontally only past a body length (two
+            // ragdolls never settle identically), and throttled: the first move
+            // waits for both falls to settle, and a body that keeps sliding off
+            // its spot (a slope) backs off instead of being re-dropped forever.
+            if (!d.downApplied) d.ragMoveTick = now; // let the fall settle first
+            bool ragdoll = (localBs & BODY_RAGDOLL) != 0 && engine::ragdollMoveEnabled();
+            if (ragdoll && haveActual) {
+                const float RAG_MOVE_DIST = 35.0f;
+                float hx = ax - out.x, hz = az - out.z;
+                float dh = std::sqrt(hx * hx + hz * hz);
+                unsigned long cool = (d.ragMoveN < 4) ? 2500UL : 30000UL;
+                if (dh <= RAG_MOVE_DIST) {
+                    d.ragMoveN = 0;
+                } else if ((now - d.ragMoveTick) >= cool) {
+                    bool ok = engine::moveRagdollBody(c, out.x, out.y, out.z);
+                    d.ragMoveTick = now;
+                    if (d.ragMoveN < 255) ++d.ragMoveN;
+                    char rb[192]; _snprintf(rb, sizeof(rb) - 1,
+                        "[down] ragdoll MOVE hand=%u,%u ok=%d d=%.0f n=%u dead=%d",
+                        out.hIndex, out.hSerial, ok ? 1 : 0, dh, (unsigned)d.ragMoveN,
+                        (d.deathLatched || (out.bodyState & BODY_DEAD)) ? 1 : 0);
+                    rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+                }
+            } else if (haveActual && dist3(ax, ay, az, out.x, out.y, out.z) > 2.0f) {
                 engine::applyRaw(c, out);
+            }
             d.downApplied = true;
             d.dbgRegime = DR_DOWN;
             d.parked = false; d.haveDest = false;
@@ -991,6 +1099,7 @@ void Replicator::applyTargets(GameWorld* gw) {
         if (d.downApplied) {
             engine::knockDown(c, false); // host says upright again -> stand back up
             d.downApplied = false;
+            d.physHealNpc = true; // a KO/carry destroyed its controller (see below)
         }
         // ---- Locomotion-body restore (squad copies) ------------------------------
         // Reached only by a body the stream says is UPRIGHT and free (the down,
@@ -1007,11 +1116,16 @@ void Replicator::applyTargets(GameWorld* gw) {
         // whole walk, 0.1 u with this restore. Same repair as the crawl drive
         // (restoreMovement = CharMovement::restore); the glide branch repeats it
         // per frame for a moving copy.
-        if (isSquad && (now - d.physHealTick) >= PHYS_HEAL_MS &&
+        // World NPC copies need it too after a KO or a carry (session 2026-11-18
+        // (2): a carried-then-revived bandit stood frozen on the join while its
+        // host body ran 1554 u away - snaps and walks moved only the nameplate).
+        // Limited to that window so far, controller-less LOD bodies are not
+        // rebuilt for nothing.
+        if ((isSquad || d.physHealNpc) && (now - d.physHealTick) >= PHYS_HEAL_MS &&
             !engine::hasPhysicsBody(c) && !coop::bodyIsDown(engine::readBodyState(c))) {
             d.physHealTick = now;
             bool restored = engine::restoreMovement(c);
-            if (restored) d.haveDest = false;   // re-issue the walk on the new controller
+            if (restored) { d.haveDest = false; d.physHealNpc = false; }
             ++physHeal_;
             char b[128]; _snprintf(b, sizeof(b) - 1,
                 "[heal] PHYSICS hand=%u,%u restored=%d", out.hIndex, out.hSerial, restored ? 1 : 0);
@@ -1151,6 +1265,15 @@ void Replicator::applyTargets(GameWorld* gw) {
         if (coop::taskIsCombat(out.task)) {
             d.dbgRegime = DR_COMBAT;
             bool hostWaiting = coop::taskIsCombatWait(out.task);
+            // The down / carry / bed branches `continue` before the disarm, so a
+            // copy KO'd mid-fight kept combatArmed and its spent re-issue budget
+            // into the NEXT fight (session 2026-11-18: "hold BREAK ... gap=60167ms").
+            // A combat stream that returns after the disarm gap is a new episode.
+            if (d.combatArmed && d.combatSeenTick != 0 &&
+                (now - d.combatSeenTick) >= COMBAT_DISARM_MS) {
+                d.combatArmed = false; d.combatOrders = 0;
+                d.combatTgtIdx = 0; d.combatTgtSer = 0; d.combatLockTick = 0;
+            }
             d.combatSeenTick = now; // feeds the disarm debounce below
             // Detach only WORLD NPCs from their town AI. A driven SQUAD member must
             // NEVER be detached: separateIntoMyOwnSquad changes its hand CONTAINER,
@@ -1173,6 +1296,29 @@ void Replicator::applyTargets(GameWorld* gw) {
             Key tk; tk.t = out.sType; tk.c = out.sContainer; tk.cs = out.sContainerSerial;
             tk.i = out.sIndex; tk.s = out.sSerial;
             Character* wantTgt = bodyForKey(tk, 0, 0);
+            if (wantTgt) {
+                // The owner is fighting a body this client holds far away from
+                // it: the two copies of the target diverged. Ordering ours sent
+                // the copy running off its owner into a 3 s snap loop (session
+                // 2026-11-18: the host's copy of the join's character chased a
+                // bandit 4100 u away, 12 snaps, while its owner fought in town).
+                // Treat it as "target not loaded here": hold at the owner's pose.
+                float qx = 0.0f, qy = 0.0f, qz = 0.0f;
+                if (engine::readPos(wantTgt, &qx, &qy, &qz)) {
+                    float fdx = qx - out.x, fdz = qz - out.z;
+                    if (fdx * fdx + fdz * fdz > COMBAT_TGT_FAR_DIST * COMBAT_TGT_FAR_DIST) {
+                        if (d.combatArmed && (now - d.combatTick) >= COMBAT_REISSUE_MS) {
+                            engine::clearGoals(c); d.combatTick = now;
+                            char fb[144]; _snprintf(fb, sizeof(fb) - 1,
+                                "[combat] tgt FAR hand=%u,%u tgt=%u,%u d=%.0f (not ordered)",
+                                out.hIndex, out.hSerial, out.sIndex, out.sSerial,
+                                std::sqrt(fdx * fdx + fdz * fdz));
+                            fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
+                        }
+                        wantTgt = 0;
+                    }
+                }
+            }
             // The copy is engaged with the WRONG body (the local brawl grabbed it).
             // Judged on BODIES, not hands: comparing the local target hand with
             // the wire key latched "wrong" for the right body under a re-keyed or
@@ -1235,7 +1381,19 @@ void Replicator::applyTargets(GameWorld* gw) {
                 if (interval > COMBAT_REISSUE_MAX_MS) interval = COMBAT_REISSUE_MAX_MS;
             }
             bool reissue = false;
-            if (!d.combatArmed) {
+            // A hold BREAK disarms, and when the combat stance comes straight
+            // back (the stream flickers combat/none every batch for a diverged
+            // copy) the re-arm was a fresh episode each time: an AI-resetting
+            // order every ~150 ms (combat_crowd run 20261118_044631: 13 orders
+            // in 3 s for one hand). Inside the re-arm cooldown keep the old
+            // backoff instead of starting over.
+            const bool rearmCool = !d.combatArmed && d.combatDisarmTick != 0 &&
+                                   (now - d.combatDisarmTick) < COMBAT_REARM_COOL_MS;
+            if (rearmCool) {
+                if ((now - d.combatTick) >= interval &&
+                    d.combatOrders <= COMBAT_REISSUE_CAP)
+                    reissue = true;
+            } else if (!d.combatArmed) {
                 reissue = true;
                 d.combatOrders = 0; // new episode: backoff restarts
             } else if (tgtChanged && (now - d.combatTick) >= COMBAT_REISSUE_MS) {
@@ -1400,9 +1558,23 @@ void Replicator::applyTargets(GameWorld* gw) {
                 // owner's fight, so its drift is footwork, not a leave: only the big
                 // distance or a source teleport moves it (a sustained-drift warp mid-
                 // brawl resets the engine's fight just like a walk order does).
+                // A squad copy that is at least as close to the owner's target as
+                // the owner is AHEAD in the same approach ('out' is the render-
+                // delayed owner pose). Warping it back to that pose is the
+                // backwards jerk players see, and the forced re-order after it
+                // resets the attack, so it repeated every cooldown until the two
+                // met. The big-distance and source-teleport leaves still apply.
+                bool squadAhead = false;
+                if (isSquad && wantTgt && !hostWaiting) {
+                    float qx = 0.0f, qy = 0.0f, qz = 0.0f;
+                    if (engine::readPos(wantTgt, &qx, &qy, &qz))
+                        squadAhead = dist3(ax, ay, az, qx, qy, qz) <=
+                                     dist3(out.x, out.y, out.z, qx, qy, qz) + combatSoftDist_;
+                }
                 bool trueLeave = !hostWaiting &&
                                  (drift > combatBigSnapDist_ || srcTeleport ||
-                                  (sustained && srcVel >= COMBAT_SNAP_VEL && !engagedSquad));
+                                  (sustained && srcVel >= COMBAT_SNAP_VEL && !engagedSquad &&
+                                   !squadAhead));
                 // The snap cooldown exists so a correction that CANNOT stick (mid-
                 // stagger, stale interp) does not re-fire every frame at a constant
                 // drift. A source TELEPORT is not that: it is a discrete, unambiguous
@@ -1510,19 +1682,31 @@ void Replicator::applyTargets(GameWorld* gw) {
         if (d.combatArmed) {
             float heldDrift = haveActual
                 ? dist3(ax, ay, az, out.x, out.y, out.z) : 0.0f;
+            // A one-batch blip still gets the full hold distance. But once the
+            // stream has reported "not fighting" for longer than the converge
+            // window, a SQUAD copy only holds inside the ordinary churn ceiling:
+            // the wide limit was the normal exit, not a safety valve (session
+            // 2026-11-16: six of eight hold BREAKs at drift 60.0-60.9 after
+            // 0.9-3.0 s), i.e. the friend's character kept brawling on its own
+            // up to 60 u from where its owner really was, then lurched back.
+            const float holdLimit =
+                (isSquad && (now - d.combatSeenTick) >= combatConvergeMs_)
+                    ? combatSnapDist_ : combatBigSnapDist_;
             if ((now - d.combatSeenTick) < COMBAT_DISARM_MS &&
-                heldDrift <= combatBigSnapDist_) {
+                heldDrift <= holdLimit) {
                 if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
                 continue;
             }
-            if (heldDrift > combatBigSnapDist_) {
+            if (heldDrift > holdLimit) {
                 char b[160]; _snprintf(b, sizeof(b) - 1,
                     "[combat] hold BREAK hand=%u,%u drift=%.1f gap=%lums",
                     out.hIndex, out.hSerial, heldDrift, now - d.combatSeenTick);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             }
             d.combatArmed = false;
-            d.combatOrders = 0;
+            // combatOrders is kept: a re-arm inside COMBAT_REARM_COOL_MS
+            // continues this episode's backoff; a later one restarts it.
+            d.combatDisarmTick = now;
             d.combatTgtIdx = 0; d.combatTgtSer = 0;
             engine::clearGoals(c); // drop the stale attack goal before re-parking
         }
@@ -2154,6 +2338,40 @@ void Replicator::applyTargets(GameWorld* gw) {
         } else {
             d.glideStallSinceMs = 0;
         }
+        // The same hand-off for a copy that MOVES but cannot keep pace. The
+        // host's copy of an NPC the join recruited kept the walk gait of its NPC
+        // life (13-15 u/s against a 60-90 u/s owner): it fell 150 u behind and
+        // teleported forward every 2-4 s for as long as the owner ran
+        // (recruit_run 20261118_004839, recruit_seated 20261118_005100). The
+        // stall test above misses it - the copy never stands still. A healthy
+        // copy covers ~0.97 of the source's ground and never trips this.
+        if (isSquad && !d.glideActive && haveActual && genuinelyMoving &&
+            gapNewest > GLIDE_LAG_GAP) {
+            unsigned long ldt = (d.glideLagTickMs != 0) ? (now - d.glideLagTickMs) : 0;
+            d.glideLagTickMs = now;
+            if (d.glideLagSinceMs == 0 || ldt == 0 || ldt > 250) {
+                d.glideLagSinceMs = now; d.glideLagSrc = 0.0f;
+                d.glideLagX = ax; d.glideLagZ = az;
+            } else {
+                d.glideLagSrc += vlen * (float)ldt / 1000.0f;
+                if ((now - d.glideLagSinceMs) >= GLIDE_LAG_MS) {
+                    float ldx = ax - d.glideLagX, ldz = az - d.glideLagZ;
+                    float body = std::sqrt(ldx * ldx + ldz * ldz);
+                    if (d.glideLagSrc >= GLIDE_LAG_MINSRC &&
+                        body < d.glideLagSrc * GLIDE_LAG_RATIO) {
+                        d.glideUntilMs = now + GLIDE_HOLD_MS;
+                        ++glideStallEnters_;
+                        char lb[160]; _snprintf(lb, sizeof(lb) - 1,
+                            "[glide] lag hand=%u,%u body=%.1f src=%.1f gap=%.1f",
+                            out.hIndex, out.hSerial, body, d.glideLagSrc, gapNewest);
+                        lb[sizeof(lb) - 1] = '\0'; coop::logLine(lb);
+                    }
+                    d.glideLagSinceMs = 0;
+                }
+            }
+        } else {
+            d.glideLagSinceMs = 0; d.glideLagTickMs = 0;
+        }
         // Once gliding, stay in it until the owner stops: handing a running copy
         // back to the walk drive mid-run left it ignoring move orders for 4-5 s
         // after a long placement episode (move_legs: body frozen with reissueSq
@@ -2402,7 +2620,22 @@ void Replicator::applyTargets(GameWorld* gw) {
                 float leadFar = dist3(ax, ay, az, tx, ty, tz) * SQUAD_REISSUE_FRAC;
                 if (leadFar > reissueDist) reissueDist = leadFar;
             }
-            if (moved > reissueDist) {
+            // No order outstanding (snap, glide/crawl exit, a heal): ALWAYS issue one.
+            // "No destination" is encoded above as moved = REISSUE_DIST + 1, which
+            // cleared the threshold only while the threshold was the flat 1 u. Once
+            // it scales with the lead distance (a 48 u lead at a run = 7.2 u) the
+            // sentinel never passes, so a squad copy snapped mid-run got no fresh
+            // order, kept running its stale pre-snap route, and was re-snapped about
+            // once a second until it happened to stand still (session 2026-11-16,
+            // 20:59:34-45: ten snaps, dest=1 on the first and dest=0 on every one
+            // after it - no walk order between any two of them).
+            if (!d.haveDest || moved > reissueDist) {
+                if (isSquad && !d.haveDest && moved <= reissueDist) {
+                    char rb[160]; _snprintf(rb, sizeof(rb) - 1,
+                        "[walk] rearm hand=%u,%u gap=%.1f thr=%.1f srcVel=%.1f",
+                        out.hIndex, out.hSerial, gapNewest, reissueDist, vlen);
+                    rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+                }
                 engine::walkTo(c, tx, ty, tz, d.catchSpd);
                 if (isSquad) ++walkReissueSquad_;
                 else         ++walkReissueNpc_;
@@ -2725,10 +2958,28 @@ void Replicator::pruneDriveGrace(unsigned long now) {
     for (std::map<Character*, unsigned long>::iterator ds = drivenSeen_.begin();
          ds != drivenSeen_.end(); ) {
         if ((now - ds->second) > 30000) {
-            canonicalOf_.erase(ds->first); // same lifetime bound (dangling ptr)
+            // The stream-key stamp of a RE-KEYED body (its local hand differs
+            // from the key the peer streams it by) is the only thing that
+            // tells the authority pass "this body is the census row X". Erasing
+            // it 30 s after the last drive tick made a parked, still-present
+            // body read as an unvouched ghost under its local hand and get
+            // culled for 20-30 s (session 2026-11-18 (2): a named NPC hidden
+            // twice). Keep it while the peer still has a target under that
+            // key; the target's own age-out (below) releases it.
+            std::map<Character*, Key>::iterator ci = canonicalOf_.find(ds->first);
+            if (ci != canonicalOf_.end() && targets_.find(ci->second) == targets_.end())
+                canonicalOf_.erase(ci);
             drivenSeen_.erase(ds++);
         }
         else ++ds;
+    }
+    // Stamps whose target is gone (aged out, the peer left) go with it.
+    for (std::map<Character*, Key>::iterator ci = canonicalOf_.begin();
+         ci != canonicalOf_.end(); ) {
+        if (targets_.find(ci->second) == targets_.end() &&
+            drivenSeen_.find(ci->first) == drivenSeen_.end())
+            canonicalOf_.erase(ci++);
+        else ++ci;
     }
 }
 

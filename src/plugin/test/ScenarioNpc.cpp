@@ -881,6 +881,289 @@ private:
     unsigned long lastKillMs_;
 };
 
+// ragdoll_move_probe (corpse divergence, 2026-11-18): host-only experiment. Kill up
+// to six nearby NPCs, then move each corpse 150 u along +x with a DIFFERENT engine
+// entry point (engine::probeMoveBody methods 1..6) and log, over the following
+// seconds, how far its reported position and its ragdoll root actually moved.
+// corpse_pos (2026-11-18 field report: "the corpse lies a few metres apart on the
+// two screens"): the HOST pins and kills an NPC next to the players. Once the death
+// has reached the JOIN, the join knocks its own copy of the corpse 250 u sideways
+// (engine::moveRagdollBody - the same call the fix uses) and then watches it: the
+// replicator must put the ragdoll back on the host's spot. Join verdict: the corpse
+// ends within END_TOL of where it lay before the shove. Before the fix every
+// correction wrote the movement controller, which a ragdoll ignores, so it stayed.
+class CorpsePosScenario : public TimedScenario {
+public:
+    explicit CorpsePosScenario(const char* nm)
+        : TimedScenario(nm, 0), haveSubj_(false), killOk_(-1), lastKillMs_(0),
+          haveCorpse_(false), shoved_(false), shoveOk_(false), lastLogMs_(0),
+          lastSearchMs_(0), endD_(-1.0f), maxBackMs_(0) {
+        for (int i = 0; i < 5; ++i) { subj_[i] = 0; corpse_[i] = 0; }
+        p0_[0] = p0_[1] = p0_[2] = 0;
+    }
+
+    virtual void onGameplay(const ScenarioContext& ctx) {
+        if (!ctx.isHost) return;
+        pinSubject(ctx);
+        if (haveSubj_) engine::holdSubjectUpright(ctx.gw, subj_);
+    }
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        if (ctx.isHost) pinSubject(ctx);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (ctx.isHost) {
+            if (!haveSubj_) { logVerdict(ctx, "no-subject"); return true; }
+            if (ctx.elapsedMs < KILL_MS) engine::holdSubjectUpright(ctx.gw, subj_);
+            if (ctx.elapsedMs >= KILL_MS && (killOk_ < 0 || ctx.elapsedMs - lastKillMs_ >= 3000)) {
+                lastKillMs_ = ctx.elapsedMs;
+                bool ok = engine::killSubject(ctx.gw, subj_);
+                if (killOk_ < 0) {
+                    killOk_ = ok ? 1 : 0;
+                    char b[64]; _snprintf(b, sizeof(b) - 1, "CPOS kill ok=%d", killOk_);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+            }
+            if (ctx.elapsedMs >= KILL_MS && ctx.elapsedMs - lastLogMs_ >= 1000) {
+                lastLogMs_ = ctx.elapsedMs;
+                Character* c = engine::resolveCharByHand(subj_[3], subj_[4], subj_[0],
+                                                         subj_[1], subj_[2]);
+                float x = 0, y = 0, z = 0;
+                if (c) engine::readPos(c, &x, &y, &z);
+                char b[128]; _snprintf(b, sizeof(b) - 1, "CPOS host t=%lu pos=%.0f,%.0f,%.0f",
+                                       (unsigned long)ctx.elapsedMs, x, y, z);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            if (ctx.elapsedMs >= HOST_DURATION_MS) {
+                passed_ = killOk_ == 1;
+                logVerdict(ctx, "done");
+                return true;
+            }
+            return false;
+        }
+        // JOIN
+        if (!haveCorpse_ && ctx.elapsedMs >= SEARCH_MS && ctx.elapsedMs - lastSearchMs_ >= 500) {
+            lastSearchMs_ = ctx.elapsedMs;
+            findCorpse(ctx);
+        }
+        Character* c = haveCorpse_
+            ? engine::resolveCharByHand(corpse_[3], corpse_[4], corpse_[0], corpse_[1], corpse_[2])
+            : 0;
+        if (c && !shoved_ && ctx.elapsedMs >= SHOVE_MS) {
+            shoved_ = true;
+            engine::readPos(c, &p0_[0], &p0_[1], &p0_[2]);
+            shoveOk_ = engine::moveRagdollBody(c, p0_[0] + SHOVE_DIST, p0_[1], p0_[2]);
+            char b[160]; _snprintf(b, sizeof(b) - 1, "CPOS shove ok=%d from=%.0f,%.0f,%.0f by=%.0f",
+                                   shoveOk_ ? 1 : 0, p0_[0], p0_[1], p0_[2], SHOVE_DIST);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        if (c && shoved_ && ctx.elapsedMs - lastLogMs_ >= 1000) {
+            lastLogMs_ = ctx.elapsedMs;
+            float x = 0, y = 0, z = 0;
+            engine::readPos(c, &x, &y, &z);
+            float dx = x - p0_[0], dz = z - p0_[2];
+            endD_ = std::sqrt(dx * dx + dz * dz);
+            if (endD_ <= END_TOL && maxBackMs_ == 0) maxBackMs_ = ctx.elapsedMs;
+            char b[160]; _snprintf(b, sizeof(b) - 1,
+                "CPOS join t=%lu pos=%.0f,%.0f,%.0f dFromHome=%.0f",
+                (unsigned long)ctx.elapsedMs, x, y, z, endD_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        if (ctx.elapsedMs >= JOIN_DURATION_MS) {
+            passed_ = haveCorpse_ && shoveOk_ && endD_ >= 0.0f && endD_ <= END_TOL;
+            logVerdict(ctx, haveCorpse_ ? "done" : "no-corpse");
+            return true;
+        }
+        return false;
+    }
+
+private:
+    void pinSubject(const ScenarioContext& ctx) {
+        if (haveSubj_) return;
+        haveSubj_ = engine::pickDownSubject(ctx.gw, subj_);
+        if (!haveSubj_) return;
+        char b[128]; _snprintf(b, sizeof(b) - 1, "CPOS pinned hand=%u,%u,%u,%u,%u",
+                               subj_[0], subj_[1], subj_[2], subj_[3], subj_[4]);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    // The join's copy: the down (death-latched) non-squad body nearest us.
+    void findCorpse(const ScenarioContext& ctx) {
+        const unsigned int MAXC = 64;
+        static engine::CorpseRead rows[MAXC]; // main-thread only
+        unsigned int n = engine::enumNpcBodiesNear(ctx.gw, 150.0f, rows, MAXC,
+                                                   /*deadOnly=*/false);
+        Character* ld = engine::leader(ctx.gw);
+        float lx = 0, ly = 0, lz = 0;
+        if (ld) engine::readPos(ld, &lx, &ly, &lz);
+        int bi = -1; float bd = 1e9f;
+        for (unsigned int i = 0; i < n; ++i) {
+            Character* c = engine::resolveCharByHand(rows[i].hand[3], rows[i].hand[4],
+                                                     rows[i].hand[0], rows[i].hand[1],
+                                                     rows[i].hand[2]);
+            if (!c || !(engine::readBodyState(c) & BODY_RAGDOLL)) continue;
+            float x = 0, y = 0, z = 0;
+            engine::readPos(c, &x, &y, &z);
+            float d = std::sqrt((x - lx) * (x - lx) + (z - lz) * (z - lz));
+            if (d < bd) { bd = d; bi = (int)i; }
+        }
+        if (bi < 0) return;
+        for (int i = 0; i < 5; ++i) corpse_[i] = rows[bi].hand[i];
+        haveCorpse_ = true;
+        char b[160]; _snprintf(b, sizeof(b) - 1,
+            "CPOS found hand=%u,%u,%u,%u,%u d=%.0f bodies=%u",
+            corpse_[0], corpse_[1], corpse_[2], corpse_[3], corpse_[4], bd, n);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    void logVerdict(const ScenarioContext& ctx, const char* why) {
+        char b[200]; _snprintf(b, sizeof(b) - 1,
+            "CPOS verdict role=%s pass=%d why=%s kill=%d corpse=%d shove=%d endD=%.0f backAt=%lu",
+            ctx.isHost ? "host" : "join", passed_ ? 1 : 0, why, killOk_, haveCorpse_ ? 1 : 0,
+            shoveOk_ ? 1 : 0, endD_, maxBackMs_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    static const unsigned long KILL_MS          = 8000;
+    static const unsigned long SEARCH_MS        = 14000;
+    static const unsigned long SHOVE_MS         = 20000;
+    static const unsigned long JOIN_DURATION_MS = 45000;
+    static const unsigned long HOST_DURATION_MS = 50000;
+    static const float         SHOVE_DIST;
+    static const float         END_TOL;
+    bool          haveSubj_;
+    int           killOk_;
+    unsigned long lastKillMs_;
+    bool          haveCorpse_, shoved_, shoveOk_;
+    unsigned long lastLogMs_, lastSearchMs_;
+    float         endD_;
+    unsigned long maxBackMs_;
+    unsigned int  subj_[5], corpse_[5];
+    float         p0_[3];
+};
+const float CorpsePosScenario::SHOVE_DIST = 250.0f;
+const float CorpsePosScenario::END_TOL    = 40.0f;
+
+static const int RM_M[6]  = { 13, 8, 13, 8, 13, 1 };
+static const int RM_KO[6] = { 0, 0, 1, 1, 1, 1 };
+class RagdollMoveProbeScenario : public TimedScenario {
+public:
+    RagdollMoveProbeScenario()
+        : TimedScenario("ragdoll_move_probe", 0), n_(0), lastKillMs_(0), applied_(false),
+          logMask_(0), stepMask_(0) {}
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        if (!ctx.isHost) return;
+        Character* ld = engine::leader(ctx.gw);
+        float lx = 0, ly = 0, lz = 0;
+        if (ld) engine::readPos(ld, &lx, &ly, &lz);
+        EntityState npcs[64];
+        unsigned int n = engine::captureNpcs(ctx.gw, npcs, 64);
+        bool used[64] = { false };
+        for (int k = 0; k < MAXB; ++k) {
+            int bi = -1; float bd = 1e9f;
+            for (unsigned int i = 0; i < n; ++i) {
+                if (used[i]) continue;
+                float dx = npcs[i].x - lx, dz = npcs[i].z - lz;
+                float d = std::sqrt(dx * dx + dz * dz);
+                if (d < bd) { bd = d; bi = (int)i; }
+            }
+            if (bi < 0) break;
+            char lb[128]; _snprintf(lb, sizeof(lb) - 1, "RMOVE pick k=%d d=%.0f leader=%.0f,%.0f",
+                                    k, bd, lx, lz);
+            lb[sizeof(lb) - 1] = '\0'; coop::logLine(lb);
+            used[bi] = true;
+            handFromEntity(npcs[bi], h_[n_]);
+            ++n_;
+        }
+        char b[96]; _snprintf(b, sizeof(b) - 1, "RMOVE start bodies=%d npcs=%u", n_, n);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!ctx.isHost) {
+            if (ctx.elapsedMs >= 10000) { passed_ = true; return true; }
+            return false;
+        }
+        if (ctx.elapsedMs >= 3000 && ctx.elapsedMs < 11000 && (lastKillMs_ == 0 || ctx.elapsedMs - lastKillMs_ >= 3000)) {
+            bool first = lastKillMs_ == 0;
+            lastKillMs_ = ctx.elapsedMs;
+            for (int i = 0; i < n_; ++i) {
+                if (!RM_KO[i]) { engine::killSubject(ctx.gw, h_[i]); continue; }
+                Character* c = body(i);
+                if (c && first) engine::knockDown(c, true);
+            }
+        }
+        if (ctx.elapsedMs >= 3500)
+            for (int i = 0; i < n_; ++i)
+                if (RM_KO[i]) { Character* c = body(i); if (c) engine::holdDown(c, 30.0f); }
+        if (!applied_ && ctx.elapsedMs >= 12000) {
+            applied_ = true;
+            for (int i = 0; i < n_; ++i) {
+                Character* c = body(i);
+                p0_[i][0] = p0_[i][1] = p0_[i][2] = 0;
+                if (!c) continue;
+                engine::readPos(c, &p0_[i][0], &p0_[i][1], &p0_[i][2]);
+                float r[3] = { 0, 0, 0 };
+                bool hr = engine::readRagdollRoot(c, r);
+                r0_[i][0] = r[0]; r0_[i][2] = r[2];
+                t_[i][0] = p0_[i][0] + 150.0f; t_[i][1] = p0_[i][1]; t_[i][2] = p0_[i][2];
+                bool ok = engine::probeMoveBodyStep(c, RM_M[i], 0, t_[i][0], t_[i][1], t_[i][2]);
+                char b[256]; _snprintf(b, sizeof(b) - 1,
+                    "RMOVE apply ko=%d m=%d ok=%d pos=%.0f,%.0f,%.0f root=%.0f,%.0f,%.0f haveRoot=%d",
+                    RM_KO[i], RM_M[i], ok ? 1 : 0, p0_[i][0], p0_[i][1], p0_[i][2], r[0], r[1], r[2],
+                    hr ? 1 : 0);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+        for (int st = 1; st <= 2; ++st) {
+            if ((stepMask_ & (1u << st)) || !applied_ || ctx.elapsedMs < 12000 + 500u * st)
+                continue;
+            stepMask_ |= (1u << st);
+            for (int i = 0; i < n_; ++i) {
+                Character* c = body(i);
+                if (c) engine::probeMoveBodyStep(c, RM_M[i], st, t_[i][0], t_[i][1], t_[i][2]);
+            }
+        }
+        static const unsigned long AT[4] = { 13300, 14500, 17000, 21000 };
+        for (int s = 0; s < 4; ++s) {
+            if ((logMask_ & (1u << s)) || ctx.elapsedMs < AT[s]) continue;
+            logMask_ |= (1u << s);
+            for (int i = 0; i < n_; ++i) {
+                Character* c = body(i);
+                float p[3] = { 0, 0, 0 }, r[3] = { 0, 0, 0 };
+                if (c) { engine::readPos(c, &p[0], &p[1], &p[2]); engine::readRagdollRoot(c, r); }
+                float dp = std::sqrt((p[0] - p0_[i][0]) * (p[0] - p0_[i][0]) +
+                                     (p[2] - p0_[i][2]) * (p[2] - p0_[i][2]));
+                float dr = std::sqrt((r[0] - r0_[i][0]) * (r[0] - r0_[i][0]) +
+                                     (r[2] - r0_[i][2]) * (r[2] - r0_[i][2]));
+                char b[256]; _snprintf(b, sizeof(b) - 1,
+                    "RMOVE ko=%d m=%d t=%lu live=%d pos=%.0f,%.0f,%.0f root=%.0f,%.0f,%.0f "
+                    "dPos=%.0f dRoot=%.0f",
+                    RM_KO[i], RM_M[i], (unsigned long)ctx.elapsedMs, c ? 1 : 0, p[0], p[1], p[2],
+                    r[0], r[1], r[2], dp, dr);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+        if (ctx.elapsedMs >= 22000) { passed_ = n_ > 0; return true; }
+        return false;
+    }
+
+private:
+    Character* body(int i) {
+        return engine::resolveCharByHand(h_[i][3], h_[i][4], h_[i][0], h_[i][1], h_[i][2]);
+    }
+    static const int MAXB = 6;
+    int           n_;
+    unsigned int  h_[MAXB][5];
+    float         p0_[MAXB][3], r0_[MAXB][3], t_[MAXB][3];
+    unsigned long lastKillMs_;
+    bool          applied_;
+    unsigned int  logMask_;
+    unsigned int  stepMask_;
+};
+
 // spawn_probe / spawn_sync (runtime NPC spawn sync, protocol 21).
 //
 // Both scenarios run the SAME script; what differs is the plugin config:
@@ -1360,6 +1643,8 @@ Scenario* makeNpcScenario(const std::string& name) {
         return new MineYieldScenario("bench_yield_joinq", 1, true, false);
     if (name == "down_order")   return new DownOrderScenario();
     if (name == "death_order")  return new DeathOrderScenario();
+    if (name == "ragdoll_move_probe") return new RagdollMoveProbeScenario();
+    if (name == "corpse_pos" || name == "corpse_pos_off") return new CorpsePosScenario(name == "corpse_pos" ? "corpse_pos" : "corpse_pos_off");
     if (name == "spawn_probe")  return new SpawnSyncScenario(/*probe=*/true);
     if (name == "spawn_sync")   return new SpawnSyncScenario(/*probe=*/false);
     if (name == "npc_census")   return new NpcCensusScenario();

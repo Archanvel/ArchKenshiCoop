@@ -107,7 +107,17 @@ void loadConfig(Config& c) {
 
     std::string mode = envOr("KENSHICOOP_MODE", fileOr(f, "role", "host").c_str());
     c.isHost      = (mode != "join");
-    c.ip          = envOr("KENSHICOOP_IP", fileOr(f, "ip", "127.0.0.1").c_str());
+    // KENSHICOOP_TEST_LOBBY=1 (harness): reproduce how REAL players get their
+    // role. The plugin loads as the default HOST - every load-time latch sees
+    // a host - and the role asked for is applied afterwards through the same
+    // coopUiConnect() the lobby / F2 panel calls. Without it a harness join is
+    // a join from its environment and never exercises that path.
+    c.testLobbyRole = 0;
+    if (envOr("KENSHICOOP_TEST_LOBBY", "") == "1") {
+        c.testLobbyRole = c.isHost ? 1 : 2;
+        c.isHost = true;
+    }
+    c.ip         = envOr("KENSHICOOP_IP", fileOr(f, "ip", "127.0.0.1").c_str());
     c.port        = std::atoi(envOr("KENSHICOOP_PORT", fileOr(f, "port", "27800").c_str()).c_str());
     c.save        = envOr("KENSHICOOP_SAVE", "");
     c.testSeconds = std::atoi(envOr("KENSHICOOP_TEST_SECONDS", "0").c_str());
@@ -194,7 +204,35 @@ void loadConfig(Config& c) {
     // speed_probe spike (which drives the quiet/loud writers directly) and
     // time_probe force it OFF via their manifest DiagEnv (KENSHICOOP_SPEED_SYNC=0).
     c.speedSync = envOr("KENSHICOOP_SPEED_SYNC", "1") != "0";
-    c.speedCombatCap = envOr("KENSHICOOP_SPEED_COMBAT_CAP", "1") != "0";
+    // speedCombatCap is also a file key now: "speedCombatCap": false lets a
+    // pair fast-forward while a squad is flagged in combat (e.g. healing up
+    // next to a fight that will not end).
+    {
+        std::string cap = envOr("KENSHICOOP_SPEED_COMBAT_CAP",
+                                fileOr(f, "speedCombatCap", "1").c_str());
+        c.speedCombatCap = !(cap == "0" || cap == "false");
+    }
+    {
+        std::string pol = envOr("KENSHICOOP_SPEED_POLICY",
+                                fileOr(f, "speedPolicy", "min").c_str());
+        c.speedPolicy = (pol == "last" || pol == "any" || pol == "1") ? 1
+                      : (pol == "host" || pol == "2")                 ? 2
+                      : 0;
+    }
+    {
+        std::string lp = envOr("KENSHICOOP_JOIN_LOAD_PAUSE",
+                               fileOr(f, "pauseWhileJoining",
+                                      c.scenario.empty() ? "1" : "0").c_str());
+        c.joinLoadPause = !(lp == "0" || lp == "false");
+    }
+    {
+        double hm = std::atof(envOr("KENSHICOOP_HEAL_MULT",
+                                    fileOr(f, "healMult", "1").c_str()).c_str());
+        if (!(hm > 0.0)) hm = 1.0;   // unparsable / zero / negative = vanilla
+        if (hm < 0.1)  hm = 0.1;
+        if (hm > 20.0) hm = 20.0;
+        c.healMult = (float)hm;
+    }
     c.trackMove = envOr("KENSHICOOP_TRACK_MOVE", "0") == "1";
 
     // Character stats sync (protocol 17): DEFAULT ON - owner-authoritative
@@ -397,7 +435,16 @@ void loadConfig(Config& c) {
         // (scripts/CoopHarness.psm1) pins KENSHICOOP_CELL_AUTH=0 for every
         // scenario that does not ask for it, which is what keeps the tier a
         // fail-open proof rather than a co-test of this flag.
-        c.cellAuth = envOr("KENSHICOOP_CELL_AUTH", "1") != "0";
+        //
+        // Local build (fix7): DEFAULT OFF. Field session 2026-11-18 (host log,
+        // squads together, collapse=1 the whole time): with it on the join still
+        // streams world NPCs and the host yields them ("[cell] yield ... the
+        // peer's stream holds this body", 129 times in 40 minutes) - the players
+        // saw fights on one screen and a bandit standing idle on the other,
+        // phantom attackers on the join, animals that never aggro. Host
+        // authority is also the only shape the scenario tier ever proved.
+        // KENSHICOOP_CELL_AUTH=1 turns it back on.
+        c.cellAuth = envOr("KENSHICOOP_CELL_AUTH", "0") == "1";
         // Co-location collapse: hand every claimed cell to the host while the
         // squads are on top of each other. Only consulted when cellAuth is on -
         // with authority off the host already owns everything. "0" restores the
@@ -506,6 +553,11 @@ std::string describeConfig(const Config& c) {
               c.censusWalkDist, c.snapDist, c.snapSeconds,
               c.scenarioArmTimeoutMs, c.attentionRadius, c.cellAuth ? 1 : 0,
               c.cellCollapse ? 1 : 0);
+    b[sizeof(b) - 1] = '\0';
+    s += b;
+    _snprintf(b, sizeof(b) - 1, " speedPolicy=%s healMult=%.2f",
+              c.speedPolicy == 1 ? "last" : c.speedPolicy == 2 ? "host" : "min",
+              c.healMult);
     b[sizeof(b) - 1] = '\0';
     s += b;
     return s;

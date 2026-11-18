@@ -1694,7 +1694,16 @@ unsigned int enumNpcBodiesNear(GameWorld* gw, float radius, CorpseRead* out,
                 if (!o) continue;
                 if (isPlayerSquad(gw, o)) continue; // the owner authors its squad
                 Character* c = static_cast<Character*>(o);
-                if (deadOnly && !g_isDeadCharFn(c)) continue;
+                if (deadOnly && !g_isDeadCharFn(c)) {
+                    // A body that is merely DOWN (unconscious) is looted exactly
+                    // like a corpse, so its inventory has to be shared the same
+                    // way. Without it the looter's take stayed local and the body
+                    // paid out again on the other client (session 2026-11-18: a
+                    // beak thing looted while KO'd on the join, then looted in
+                    // full on the host after it died; same again with a bull).
+                    if (!g_isDownFn || !g_isDownFn(c)) continue;
+                    if (c->inSomething == IN_BED) continue; // a sleeper is not loot
+                }
                 if (!o->getInventory()) continue;   // nothing to author
                 bool dup = false; // the interest spheres can overlap
                 for (unsigned int k = 0; k < n; ++k)

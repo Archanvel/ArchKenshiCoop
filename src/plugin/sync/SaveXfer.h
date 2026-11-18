@@ -121,6 +121,9 @@ int tickWatch(unsigned int* outFiles, unsigned __int64* outBytes,
 bool beginSend(NetLink& net, u32 localId, const std::string& name,
                u32 targetMask = PEER_MASK_ALL);
 bool sending();
+// Name / target mask of the active (or last) send.
+const std::string& sendName();
+u32 sendMask();
 // Pump the active transfer (call every main-loop tick; internally throttled).
 // Logs "[save] XFER-SENT ..." and returns true on the tick the DONE goes out.
 bool tickSend(NetLink& net, u32 localId);

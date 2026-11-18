@@ -25,7 +25,7 @@ typedef double         f64;
 // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
-const u16 PROTOCOL_VERSION = 66;
+const u16 PROTOCOL_VERSION = 67; // 67: MedicalPacket.koTimer
 
 // Session size: the host (player id 0) plus up to MAX_PLAYERS-1 joins (ids
 // 1..MAX_PLAYERS-1). Star topology: joins talk only to the host, which relays
@@ -427,8 +427,18 @@ inline u16 bodyFlags(u16 s) { return (u16)(s & ~BODY_PRONE_MASK); }
 // (DOWN|RAGDOLL|PS_KO) for ~2 s of collapse, then settles at bs=1033
 // (DOWN|CRAWL|PS_CRIPPLED) with unc=0 dead=0 for the rest of the run.
 // Dead wins unconditionally: a corpse is never a crawler.
+// A crawler also passes through PS_STAYING_LOW for a moment (session 2026-11-18:
+// a crippled bandit streamed 1033 -> 521 -> 1033 within 120 ms, DOWN|CRAWL with
+// prone STAYING_LOW, no ragdoll). Read as down-not-crawling, that blip sent a
+// KNOCKOUT and a REVIVE back to back and the peer's copy fell over and got up.
+// DOWN|CRAWL at STAYING_LOW without a ragdoll is the same conscious crawler; a
+// sneaker never has BODY_DOWN, and a real collapse always has the ragdoll bit.
 inline bool bodyIsCrawling(u16 s) {
-    return bodyProne(s) == PRONE_CRIPPLED && (s & BODY_DEAD) == 0;
+    if (s & BODY_DEAD) return false;
+    const u8 p = bodyProne(s);
+    if (p == PRONE_CRIPPLED) return true;
+    return p == PRONE_STAYING_LOW && (s & BODY_DOWN) != 0 && (s & BODY_CRAWL) != 0 &&
+           (s & BODY_RAGDOLL) == 0;
 }
 // bodyIsDown() minus the conscious crawlers. This is the predicate that the
 // KO/REVIVE edge detector and the receiver's down ENFORCEMENT must use: with
@@ -1040,6 +1050,12 @@ struct MedicalPacket {
     // matching limbState == LIMB_REPLACED). Lets the peer fabricate + fit
     // the same prosthetic (Phase D).
     char limbSid[4][48];
+    // Protocol 67: the owner's knockout countdown (MedicalSystem::knockoutTimer,
+    // seconds; < 0 = not carried). The peer pinned its copy's timer at a fixed
+    // 8 s to keep it down, so every unconscious body showed "8 s" on the other
+    // screen for the whole knockout. Not part of the change fingerprint - the
+    // receiver counts it down locally between packets.
+    f32 koTimer;
 };
 
 // First aid administered ON a driven copy, forwarded to the body's OWNER.
@@ -1099,7 +1115,21 @@ struct CombatHitPacket {
 // late retransmit never rolls back a newer decision.
 enum SpeedFlags {
     SPEED_PAUSED    = 1,
-    SPEED_IN_COMBAT = 2
+    SPEED_IN_COMBAT = 2,
+    // Speed-policy extension (no layout change; a build that predates these
+    // tests only the two bits above and ignores the rest, so the protocol
+    // number stays put).
+    //   SPEED_USER   (REQ): this request is a FRESH click choosing a speed,
+    //                not a safety resend / combat edge / adopted value. Under
+    //                the "last" policy it is what moves the session's speed.
+    //   SPEED_FOLLOW (SET): the host runs a non-consensus policy - adopt the
+    //                effective as your own vote, so nobody is left holding a
+    //                stale request that springs back on the next unpause.
+    //   SPEED_EXT    (REQ): the sender understands the two bits above. Without
+    //                it the host falls back to "the vote's value changed".
+    SPEED_USER      = 4,
+    SPEED_FOLLOW    = 8,
+    SPEED_EXT       = 16
 };
 struct SpeedPacket {
     u8  type;    // = PKT_SPEED_REQ or PKT_SPEED_SET

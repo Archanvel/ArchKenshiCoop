@@ -197,6 +197,8 @@ const unsigned long COMBAT_CONVERGE_MS = 400; // drift must persist over the sna
 // MOVE_ON_FREE_WILL and dropped the attack until the next re-issue.
 const unsigned long COMBAT_LOCK_HOLD_MS = 1500;
 const unsigned long COMBAT_REISSUE_MS     = 1500; // base re-issue throttle
+const float         COMBAT_TGT_FAR_DIST   = 1000.0f; // target copy this far from the owner = diverged
+const unsigned long COMBAT_REARM_COOL_MS  = 3000; // re-arm this soon after a disarm = same episode
 const unsigned long COMBAT_REISSUE_MAX_MS = 6000; // backoff cap
 const unsigned int  COMBAT_REISSUE_CAP    = 5;    // max timer re-issues per episode: a copy
                                                   // that won't engage (fleeing template,
@@ -239,6 +241,12 @@ const float         GLIDE_SLEW_BAND   = 0.10f; // own sim this far off 1x -> gli
 const float         GLIDE_STALL_GAP   = 20.0f;
 const float         GLIDE_STALL_MOVE  = 1.0f;
 const unsigned long GLIDE_STALL_MS    = 400;
+// Slow-copy fallback: the owner runs, the gap is open, and over GLIDE_LAG_MS our
+// copy covered less than GLIDE_LAG_RATIO of the ground the source covered.
+const float         GLIDE_LAG_GAP     = 30.0f;
+const unsigned long GLIDE_LAG_MS      = 1000;
+const float         GLIDE_LAG_MINSRC  = 40.0f;
+const float         GLIDE_LAG_RATIO   = 0.5f;
 // Furniture occupancy sync (protocol 19): same shape as the carry self-heal.
 const unsigned long FURN_HEAL_MS = 1500;  // min gap between self-heal enters
 const unsigned long FURN_EXIT_MS = 3000;  // stream must stop reporting occupancy

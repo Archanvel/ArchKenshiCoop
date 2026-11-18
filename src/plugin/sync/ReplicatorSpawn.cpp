@@ -81,6 +81,7 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
                 spawnReq_.erase(it->first); // allow a fresh REQ/mint cycle
                 lifeSet(it->first, LIFE_UNKNOWN, "proxy-despawned");
+                mintedBodies_.erase(it->second); // gone: its address may be reused
                 proxyByKey_.erase(it++);
                 continue;
             }
@@ -882,7 +883,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
         }
         switch (ev.event) {
             case EVT_DEATH:    d.deathLatched = true;  d.koLatched = true;  break;
-            case EVT_KNOCKOUT: d.koLatched = true;                          break;
+            case EVT_KNOCKOUT: d.koLatched = true; d.koUpTick = 0;          break;
             case EVT_REVIVE:   d.deathLatched = false; d.koLatched = false; break;
             case EVT_AMPUTATE:
             case EVT_CRUSH: {
@@ -993,6 +994,10 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                                        ev.aIndex, ev.aSerial };
                 int kind = (int)ev.arg;
                 bool ok = occ && engine::applyFurniture(0, occ, fh, kind, true);
+                if (ok && ownHands_.find(k) == ownHands_.end() && (kind == 1 || kind == 2)) {
+                    for (int fi = 0; fi < 5; ++fi) d.furnHand[fi] = fh[fi];
+                    d.furnHandKind = kind;
+                }
                 char fb[160]; _snprintf(fb, sizeof(fb) - 1,
                     "[furn] RECV ENTER id=%u occ=%u,%u furn=%u,%u kind=%d ok=%d",
                     ev.eventId, ev.sIndex, ev.sSerial, ev.aIndex, ev.aSerial,
@@ -1010,6 +1015,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                                        ev.aIndex, ev.aSerial };
                 int kind = (int)ev.arg;
                 bool ok = occ && engine::applyFurniture(0, occ, fh, kind, false);
+                d.furnHandKind = 0;
                 char fb[160]; _snprintf(fb, sizeof(fb) - 1,
                     "[furn] RECV EXIT id=%u occ=%u,%u furn=%u,%u kind=%d ok=%d",
                     ev.eventId, ev.sIndex, ev.sSerial, ev.aIndex, ev.aSerial,

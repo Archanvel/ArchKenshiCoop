@@ -109,6 +109,9 @@ $script:CoopDiagEnvKeys = @(
     # a fail-open proof rather than a co-test. Note this one is not merely cleared
     # but pinned to "0" below: the DLL default is ON, so clearing would OPT IN.
     'KENSHICOOP_CELL_AUTH'
+    # --- ragdoll re-placement (EngineEntity.cpp moveRagdollBody) -----------------
+    # "0" restores the old inert corpse correction; only corpse_pos_off sets it.
+    'KENSHICOOP_RAGDOLL_MOVE'
     # --- combat speed cap (Config.cpp) ------------------------------------------
     # The speed arbiter pins the sim to 1x while either player squad fights, which
     # is right for players and wrong for a scenario whose job is to cover 100 k u:
