@@ -1,46 +1,122 @@
 # Arch Kenshi Coop
 
-A bug-fix fork of [Savas07/KenshiCoop](https://github.com/Savas07/KenshiCoop)
-v0.59.1, which itself continues [nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop).
-All credit for the mod goes to its original authors; this fork adds fixes found
-while playing two-player sessions, each one checked on the two-client test
-harness. Version string: `0.59.1-fixN`. **Wire protocol 67** - not compatible
-with v0.59.1 (66), so every player needs the same build.
+Кооператив для [Kenshi](https://lofigames.com/): один игрок открывает свой мир,
+друг заходит в него со своим отрядом. Это не новый мод, а **сборка с
+исправлениями** поверх [Savas07/KenshiCoop](https://github.com/Savas07/KenshiCoop)
+v0.59.1 (который продолжает [nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop)).
+Весь мод написали они — здесь только то, что мы чинили, пока играли вдвоём.
 
-Форк с исправлениями поверх Savas07/KenshiCoop v0.59.1. У всех игроков должна
-стоять одна и та же сборка.
+*English: a bug-fix build of Savas07/KenshiCoop v0.59.1 — see
+[In English](#in-english) below.*
 
-### Changes since v0.59.1 (fix1 - fix10)
+## Зачем эта сборка
 
-- **Host crash** when a peer picked up the copy of an item the host had sold to
-  a trader: a sale is no longer treated as a ground drop, and the item pointer
-  is re-validated before use.
-- **Role set-up for players joining from the menu / F2 panel.** The plugin
-  started every game as host and did not fully switch roles on connect, so a
-  joined player's hits did no damage on the host, their containers and shop
-  stock overwrote the host's, and traders restocked on both sides. Roles are
-  now re-applied on connect and reset on disconnect.
-- **Stuck world transfer:** a join whose save download failed waited in the
-  menu forever; it now re-requests, and the host does not re-save mid-transfer.
-- **Unconscious timer:** a knocked-out copy showed a frozen "8 s"; it now shows
-  and counts down the owner's real timer (protocol 67). Carried or bedded
-  bodies no longer wake early.
-- **Beds:** a copy that got up next to the bed it lay in is put back into that
-  exact bed (beds were matched by English names, which fails on localised games).
-- **Trader money** growing by itself (one shop's cash was counted twice; NPC
-  copies "bought" goods on the join).
-- **Corpses lying in different places** for host and join: ragdolled bodies
-  are now actually moved (kill ragdoll, teleport, re-ragdoll in one frame).
-- **Crawling NPC flickering** knocked out / revived on the join.
-- Desync fixes: negative limb health, healing rolled back during bandaging,
-  stuck knock-out state, NPCs vanishing for 20-30 s, guards hidden after the
-  host leaves, frozen copy of a carried NPC that woke up, attack-order spam in
-  crowds, combat rubber-banding, bodies dropping out of mid-range sync, zone
-  hand-over grace period, stale records after a rejoin, stuck speech bubbles.
-- **New options** in `coop_config.json`: `speedPolicy`, `speedCombatCap`,
-  `healMult` (see below); the world pauses while a friend is loading in.
+Мы с другом играли в оригинальный мод и записывали всё, что ломалось: пропавшие
+после покупки вещи, двери, которые открыты у одного и закрыты у другого, руда,
+которая добывается дважды, NPC, которые трясутся на месте. Каждую такую находку
+разбирали по логам обоих игроков и чинили. Всё, что можно проверить
+автоматически, прогоняется на стенде из двух копий игры.
 
-Upstream README follows.
+Текущая версия: **0.59.1-fix21**, сетевой протокол **70**.
+
+> **Важно:** у всех игроков должна стоять одна и та же сборка. С оригинальной
+> v0.59.1 и с версией из Мастерской Steam она не соединится.
+
+## Как поставить
+
+Нужны Kenshi 1.0.65 (Steam) и [RE_Kenshi 0.3.1+](https://www.nexusmods.com/kenshi/mods/847).
+
+1. Скачай `KenshiCoop-fix21.zip` со страницы
+   [релизов](https://github.com/Archanvel/ArchKenshiCoop/releases/latest).
+2. Распакуй. Внутри одна папка `KenshiCoop` — положи её в `mods` игры, чтобы
+   получилось `<Kenshi>\mods\KenshiCoop\KenshiCoop.dll`
+   (обычно `C:\Program Files (x86)\Steam\steamapps\common\Kenshi\mods\`).
+   Старую папку `KenshiCoop` перед этим удали или замени целиком.
+3. Запусти Kenshi и включи **KenshiCoop** в списке модов.
+4. В главном меню появится кнопка **MULTIPLAYER**: хост жмёт **HOST GAME** и
+   приглашает друга через Steam, друг принимает приглашение.
+
+Если кнопки **MULTIPLAYER** нет — мод не загрузился: проверь, что папка лежит
+именно в `mods\KenshiCoop` и что RE_Kenshi установлен.
+
+## Что исправлено
+
+Коротко о самом заметном; полный список по версиям — в [CHANGELOG.md](CHANGELOG.md).
+
+- **Торговля.** Товар, купленный сразу в инвентарь персонажа друга, больше не
+  пропадает. Оба игрока видят у торговца один и тот же ассортимент, деньги
+  торговцев не растут сами собой.
+- **Двери** открыты и закрыты у обоих одинаково, в том числе в городах, куда
+  игроки пришли в разное время.
+- **Добыча и производство.** Шахта не выдаёт руду дважды, когда хост отвёл
+  камеру.
+- **Кровати и лечение.** Персонаж остаётся в той кровати, куда его положили;
+  в кровати лечение идёт быстрее (настраивается).
+- **Нокаут, трупы, ползущие.** Настоящий таймер «без сознания», трупы лежат в
+  одном месте у обоих, ползущий NPC не мигает.
+- **Движение.** NPC не проваливаются под землю, не дёргаются у кроватей и
+  станков; персонаж, который несёт раненого, не телепортируется рывками.
+- **Фракции.** Вступление во фракцию засчитывается обоим игрокам.
+- **Удобства.** Игра по IP прямо из окна Multiplayer, русский интерфейс мода,
+  сообщение «торговец занят».
+- **Вылеты и зависания.** Хост не падает при подборе проданной вещи, загрузка
+  мира не зависает в меню.
+
+## Настройки
+
+Файл `<Kenshi>\mods\KenshiCoop\coop_config.json`, читается при запуске игры.
+Обоим игрокам лучше держать одинаковые значения.
+
+| Ключ | В архиве | Что делает |
+| --- | --- | --- |
+| `speedPolicy` | `"host"` | Кто управляет скоростью игры: `"host"` — только хост, `"last"` — последний нажавший, `"min"` — самая низкая из выбранных (как в оригинале). |
+| `speedCombatCap` | `true` | Во время боя скорость держится на 1x. |
+| `pauseWhileJoining` | `true` | Мир стоит на паузе, пока друг загружается. |
+| `healMult` | `1` | Скорость лечения персонажей игроков (1 — как в игре). |
+| `bedHealMult` | `3` | Во сколько раз быстрее лечит кровать. |
+| `lang` | `"auto"` | Язык интерфейса мода: `"auto"` — как в игре. |
+
+## Что ещё не работает
+
+- Костёр иногда не принимает сырое мясо от клиента (мясо возвращается, не теряется).
+- У клиента шахтёр продолжает махать киркой у заполненной шахты (лишней руды нет).
+- Если клиент открыл торговца раньше хоста, он сначала видит свой ассортимент.
+- Раненые NPC у клиента могут двигаться рывками — причина ищется.
+
+Нашёл баг — напиши в [Issues](https://github.com/Archanvel/ArchKenshiCoop/issues):
+что произошло, примерное время и логи `KenshiCoop_*.log` из папки игры от
+**обоих** игроков. По времени и двум логам причина обычно находится.
+
+## In English
+
+A bug-fix build of [Savas07/KenshiCoop](https://github.com/Savas07/KenshiCoop)
+v0.59.1 (itself a continuation of [nhoral/KenshiCoop](https://github.com/nhoral/KenshiCoop)).
+All credit for the mod goes to its authors. We play it as a pair, write down
+what breaks, trace each report through both players' logs and fix it; whatever
+can be checked automatically runs on a two-client test harness.
+
+- Current version **0.59.1-fix21**, wire protocol **70**. Every player needs
+  this exact build; it does not connect to stock v0.59.1 or the Workshop version.
+- Install: download `KenshiCoop-fix21.zip` from
+  [Releases](https://github.com/Archanvel/ArchKenshiCoop/releases/latest), put
+  the `KenshiCoop` folder into `<Kenshi>\mods\`, enable the mod, use
+  **MULTIPLAYER** in the main menu. Requires Kenshi 1.0.65 and RE_Kenshi 0.3.1+.
+- Fixed: items bought into the other player's inventory vanishing, different
+  shop stock per player, doors out of sync, mines paying out twice, beds,
+  knock-out timers, corpse positions, NPCs under ground or jittering at beds
+  and machines, a host crash and a stuck world transfer. Details per version
+  in [CHANGELOG.md](CHANGELOG.md).
+- New `coop_config.json` keys: `speedPolicy`, `speedCombatCap`,
+  `pauseWhileJoining`, `healMult`, `bedHealMult`.
+
+---
+
+*Ниже — README оригинального мода (Savas07/KenshiCoop) без изменений: как
+устроен мод, лобби, сохранения, сборка из исходников. Ссылки на установку в нём
+ведут на оригинальные релизы — для этой сборки используй раздел «Как поставить»
+выше.*
+
+*Below is the upstream README, unchanged.*
 
 ---
 
