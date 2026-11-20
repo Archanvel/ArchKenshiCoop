@@ -34,6 +34,9 @@ void diagWeaponCreate(GameWorld* gw, const unsigned int cHand[5], int maxTry);
 // template; diagWeaponCreate measured 0/24). The last SUCCESSFUL engine weapon mint's
 // args are captured for probeReplayWeaponMint. Install once (host side).
 bool installCreateItemTraceHook();
+// Damage-floater trace: log every rising ScreenLabel (caption, engine caller stack,
+// tracked hand) as "[floater] ..." lines. Diagnostic; KENSHICOOP_DEBUG_FLOATERS=1.
+bool installFloaterTraceHook();
 // Replay the last captured engine weapon mint from PLUGIN context: same GameData
 // pointers/level/faction, a fresh blank hand, tryAddItem into cHand's inventory.
 // Returns 1 created+added / 0 nothing captured or create returned null / -1 fault.

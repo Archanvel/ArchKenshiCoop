@@ -98,7 +98,7 @@ static void testSizes() {
     CHECK_EQ("sizeof(SpawnInfoPacket)",         sizeof(SpawnInfoPacket),         143);
     CHECK_EQ("sizeof(MoneyPacket)",             sizeof(MoneyPacket),             13);
     CHECK_EQ("sizeof(MoneyDeltaPacket)",        sizeof(MoneyDeltaPacket),        13);
-    CHECK_EQ("sizeof(FactionPacket)",           sizeof(FactionPacket),           61);
+    CHECK_EQ("sizeof(FactionPacket)",           sizeof(FactionPacket),           289);
     CHECK_EQ("sizeof(TimePacket)",              sizeof(TimePacket),              17);
     CHECK_EQ("sizeof(DoorPacket)",              sizeof(DoorPacket),              31);
     CHECK_EQ("sizeof(BuildPlacePacket)",        sizeof(BuildPlacePacket),        94);

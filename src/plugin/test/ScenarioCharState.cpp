@@ -585,7 +585,7 @@ public:
         : TimedScenario("npc_carry", 0), recvCount_(0), lastLogMs_(0),
           haveL0_(false), haveM2_(false), haveNpc_(false),
           nDown_(false), nPick_(false), nWalk_(false), nDrop_(false),
-          lastHoldMs_(0) {}
+          lastHoldMs_(0), latchMs_(0) {}
 
     virtual void onStart(const ScenarioContext&) {}
 
@@ -605,14 +605,19 @@ public:
             bool ok = engine::orderDownSubject(ctx.gw, m2Hand_);
             logAct("N down", m2Hand_, ok); nDown_ = true;
         }
-        if (ctx.isHost && haveNpc_ && haveM2_ && !nPick_ && ctx.elapsedMs >= N_PICK_AT_MS) {
+        // The pick/walk/drop legs run on the planned schedule, shifted by however
+        // late the carrier was latched (a late latch used to fire all three in
+        // the same millisecond, so the carry was never seen).
+        const unsigned long shift = (haveNpc_ && latchMs_ > NPC_LATCH_AT_MS)
+                                        ? latchMs_ - NPC_LATCH_AT_MS : 0;
+        if (ctx.isHost && haveNpc_ && haveM2_ && !nPick_ && ctx.elapsedMs >= N_PICK_AT_MS + shift) {
             bool ok = engine::carrySubject(ctx.gw, npcHand_, m2Hand_);
             logAct("N pickup", m2Hand_, ok); nPick_ = true;
         }
-        if (ctx.isHost && haveNpc_ && !nWalk_ && ctx.elapsedMs >= N_WALK_AT_MS) {
+        if (ctx.isHost && haveNpc_ && !nWalk_ && ctx.elapsedMs >= N_WALK_AT_MS + shift) {
             nWalk_ = walkLeg(npcHand_, "N");
         }
-        if (ctx.isHost && haveNpc_ && !nDrop_ && ctx.elapsedMs >= N_DROP_AT_MS) {
+        if (ctx.isHost && haveNpc_ && !nDrop_ && ctx.elapsedMs >= N_DROP_AT_MS + shift) {
             bool ok = engine::dropSubject(ctx.gw, npcHand_, /*ragdoll*/true);
             logAct("N drop", npcHand_, ok); nDrop_ = true;
         }
@@ -658,9 +663,9 @@ private:
     static const unsigned long N_PICK_AT_MS     = 12000;
     static const unsigned long N_WALK_AT_MS     = 14000;
     static const unsigned long N_DROP_AT_MS     = 24000;
-    static const unsigned long HOLD_M2_UNTIL_MS = 30000;
-    static const unsigned long HOST_DURATION_MS = 40000;
-    static const unsigned long JOIN_DURATION_MS = 36000;
+    static const unsigned long HOLD_M2_UNTIL_MS = 40000;
+    static const unsigned long HOST_DURATION_MS = 52000;
+    static const unsigned long JOIN_DURATION_MS = 48000;
     static const unsigned int  MAX_SQUAD        = 32;
     static const unsigned int  MAX_NPCS         = 96;
 
@@ -742,22 +747,43 @@ private:
         if (!l0 || !engine::readPos(l0, &lx, &ly, &lz)) return;
         static Character*  chars[MAX_NPCS]; // main-thread only
         static EntityState states[MAX_NPCS];
-        unsigned int n = engine::listNpcs(ctx.gw, chars, states, MAX_NPCS);
+        // Wide query (600 u): the 200 u stream bubble around the leader was empty
+        // for the first 6-17 s of some runs - every town NPC stood farther out
+        // until one happened to wander in, and the fixed schedule had already
+        // run (2026-11-18: four fails in a row, then a pass at the same build).
+        unsigned int n = engine::listNpcsWide(ctx.gw, 600.0f, chars, states, MAX_NPCS);
         int best = -1; float bestD2 = 1e18f;
         for (unsigned int i = 0; i < n; ++i) {
             if (coop::bodyIsDown(states[i].bodyState) ||
                 (states[i].bodyState & BODY_DEAD) != 0) continue;
+            if (states[i].hIndex == m2Hand_[3] && states[i].hSerial == m2Hand_[4]) continue;
             float dx = states[i].x - lx, dy = states[i].y - ly, dz = states[i].z - lz;
             float d2 = dx*dx + dy*dy + dz*dz;
             if (d2 < bestD2) { bestD2 = d2; best = (int)i; }
         }
-        if (best < 0) return;
+        if (best < 0) {
+            static unsigned long s_logMs = 0; // main thread only
+            if (ctx.elapsedMs - s_logMs >= 2000) {
+                s_logMs = ctx.elapsedMs;
+                unsigned int down = 0, dead = 0;
+                for (unsigned int i = 0; i < n; ++i) {
+                    if (states[i].bodyState & BODY_DEAD) ++dead;
+                    else if (coop::bodyIsDown(states[i].bodyState)) ++down;
+                }
+                char b[160]; _snprintf(b, sizeof(b) - 1,
+                    "SCENARIO CARRY latch-miss t=%lu listed=%u down=%u dead=%u l0=%.0f,%.0f",
+                    ctx.elapsedMs, n, down, dead, lx, lz);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            return;
+        }
         npcHand_[0] = states[best].hType;
         npcHand_[1] = states[best].hContainer;
         npcHand_[2] = states[best].hContainerSerial;
         npcHand_[3] = states[best].hIndex;
         npcHand_[4] = states[best].hSerial;
         haveNpc_ = true;
+        latchMs_ = ctx.elapsedMs;
         logSubject("NPC", npcHand_);
     }
 
@@ -765,7 +791,8 @@ private:
     void detectJoinCarrier(const ScenarioContext& ctx) {
         static Character*  chars[MAX_NPCS]; // main-thread only
         static EntityState states[MAX_NPCS];
-        unsigned int n = engine::listNpcs(ctx.gw, chars, states, MAX_NPCS);
+        // Same 600 u reach as the host's carrier latch.
+        unsigned int n = engine::listNpcsWide(ctx.gw, 600.0f, chars, states, MAX_NPCS);
         for (unsigned int i = 0; i < n; ++i) {
             engine::CarryRead cr;
             if (!engine::readCarry(chars[i], &cr) || !cr.carrying) continue;
@@ -792,6 +819,7 @@ private:
     bool          haveL0_, haveM2_, haveNpc_;
     bool          nDown_, nPick_, nWalk_, nDrop_;
     unsigned long lastHoldMs_;
+    unsigned long latchMs_;
     unsigned int  l0Hand_[5];
     unsigned int  m2Hand_[5];
     unsigned int  npcHand_[5];

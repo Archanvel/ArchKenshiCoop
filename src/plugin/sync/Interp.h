@@ -33,6 +33,10 @@ struct InterpConfig {
     // render minutes in the past.
     float         cadenceDelayK;      // ceiling = avgInterval * K (dense: no-op)
     unsigned long maxCadenceDelayMs;  // hard bound on the cadence-scaled ceiling
+    // Current game-speed multiplier (>= 1). The segment-teleport test scales its
+    // travel allowance by it: at 5x a running body covers 5x the ground per
+    // segment and was read as teleporting (2026-11-19 session, 00:51-00:54).
+    float         speedMult;
     InterpConfig();
 };
 

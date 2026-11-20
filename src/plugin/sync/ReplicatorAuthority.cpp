@@ -205,8 +205,31 @@ Replicator::Key Replicator::identityKeyOf(Character* c, const EntityState& st) c
     return (ci != canonicalOf_.end()) ? ci->second : keyOf(st);
 }
 
+// Is this body attacking one of THIS client's player characters right now?
+static bool attackingLocalPlayer(GameWorld* gw, Character* c) {
+    engine::CombatRead cr;
+    return engine::readCombat(c, &cr) && cr.hasTarget &&
+           engine::isPlayerSquadHand(gw, cr.target);
+}
+
 void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
     if (!gw) return;
+    // Fast path for a ghost that is ATTACKING a player (ghost_ambush run
+    // 20261118_181926: a join-only hostile squad spawned beside the leader was
+    // swinging at him from 250 ms and stayed visible for the whole 75-frame
+    // debounce - the field report's "phantoms ran at me and vanished"). The
+    // debounce exists for stream hiccups on REAL bodies, and a real body near a
+    // player is either streamed (fresh = the interp still has samples) or
+    // census-vouched, so it never reaches this count. Only with a fresh census.
+    const unsigned int SUPPRESS_ATTACKER_FRAMES = 15;
+    const unsigned int SUPPRESS_NEAR_FRAMES     = 20;
+    const float        SUPPRESS_NEAR_DIST       = 300.0f;
+    float leaderX = 0.0f, leaderY = 0.0f, leaderZ = 0.0f;
+    bool haveLeaderPos = false;
+    {
+        Character* ld = engine::leader(gw);
+        haveLeaderPos = ld && engine::readPos(ld, &leaderX, &leaderY, &leaderZ);
+    }
     // Hysteresis (step 5, spike 18): a hard streamed/unstreamed edge churned
     // boundary NPCs. Suppress only after a sustained unstreamed run (~1 s), and
     // restore only after a sustained streamed dwell (~2 s), counted in frames.
@@ -340,7 +363,9 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
     // away with nobody near it, had it at peace. Measure the gap before
     // deciding what to do about it - one line per proxy per second, against
     // the census position of the STREAM key that minted it.
-    if (censusFresh && !proxyChars.empty()) {
+    // Scenario runs only: with a town's worth of proxies this was a quarter of
+    // the join's log (31801 of 128651 lines in the 2026-11-19 session).
+    if (proxyTelemetry_ && censusFresh && !proxyChars.empty()) {
         unsigned long nowD = nowMs();
         if ((nowD - proxyDriftLogMs_) >= 1000) {
             proxyDriftLogMs_ = nowD;
@@ -532,7 +557,29 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
             // Host neither streams nor lists it (census-absent ghost): after
             // the debounce, hide + freeze so the local AI can't run a divergent
             // copy on top of the host-driven world.
-            if (s == suppressed_.end() && ac.unstreamed >= SUPPRESS_AFTER_FRAMES) {
+            bool due = ac.unstreamed >= SUPPRESS_AFTER_FRAMES;
+            bool fast = false;
+            if (!due && censusFresh && s == suppressed_.end() &&
+                ac.unstreamed >= SUPPRESS_ATTACKER_FRAMES &&
+                attackingLocalPlayer(gw, chars[i]))
+                due = fast = true;
+            // ...and any ghost that close to our leader (2026-11-19: "a gorilla
+            // appeared right in front of the client for a second and vanished").
+            // Within the stream bubble a real body is streamed or census-listed
+            // inside a few frames, so 20 frames is enough corroboration.
+            if (!due && censusFresh && s == suppressed_.end() && haveLeaderPos &&
+                ac.unstreamed >= SUPPRESS_NEAR_FRAMES) {
+                float lx = states[i].x - leaderX, lz = states[i].z - leaderZ;
+                if (lx * lx + lz * lz < SUPPRESS_NEAR_DIST * SUPPRESS_NEAR_DIST)
+                    due = fast = true;
+            }
+            if (s == suppressed_.end() && due) {
+                if (fast) {
+                    char b[112]; _snprintf(b, sizeof(b) - 1,
+                        "[authority] fast suppress hand=%u,%u (ghost near/attacking a player, %u frames)",
+                        states[i].hIndex, states[i].hSerial, ac.unstreamed);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
                 // Phase 2 hardening: only RECORD the suppression when the engine
                 // call actually landed. A faulted hide used to be booked as done,
                 // leaving the body visible forever with no evidence - the silent
@@ -649,7 +696,10 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
                     if (censusFreezeAi_ && drift >= 0.0f)
                         censusFreezeDivergedAi(wChars[i], k, drift);
                 }
-            } else if (s == suppressed_.end() && ac.unstreamed >= SUPPRESS_AFTER_FRAMES) {
+            } else if (s == suppressed_.end() &&
+                       (ac.unstreamed >= SUPPRESS_AFTER_FRAMES ||
+                        (ac.unstreamed >= SUPPRESS_ATTACKER_FRAMES &&
+                         attackingLocalPlayer(gw, wChars[i])))) {
                 if (engine::suppressNpc(gw, wChars[i])) {
                     suppressed_[k] = wChars[i];
                     ++authSuppresses_;
@@ -1677,6 +1727,7 @@ void Replicator::reconcileProxy(Character* c, const EntityState& st,
     const unsigned long nowO = nowMs();
     if (drivenChars_.find(c) != drivenChars_.end()) {
         proxyOrphanMs_.erase(pk->second);
+        proxyOrphanSeenMs_.erase(pk->second);
         return;
     }
     float drift = parkDivergedCopy(c, st, pk->second);
@@ -1694,6 +1745,7 @@ void Replicator::reconcileProxy(Character* c, const EntityState& st,
     if (!cellAuth_ && censusFreezeAi_ && censusLive &&
         censusPos_.find(pk->second) == censusPos_.end() &&
         !censusVouches(pk->second, nowO)) {
+        proxyOrphanSeenMs_[pk->second] = nowO;
         std::map<Key, unsigned long>::iterator om = proxyOrphanMs_.find(pk->second);
         if (om == proxyOrphanMs_.end()) { proxyOrphanMs_[pk->second] = nowO; return; }
         if ((nowO - om->second) < 3000) return;      // debounce: mint/census races
@@ -1709,7 +1761,40 @@ void Replicator::reconcileProxy(Character* c, const EntityState& st,
         }
     } else {
         proxyOrphanMs_.erase(pk->second);
+        proxyOrphanSeenMs_.erase(pk->second);
     }
+}
+
+// One frame of census glide: step the copy toward its census position at a speed
+// that closes the gap in about a census period (1 s), 10..250 u/s, facing the
+// direction of travel, with the walk/run clip mirrored. Height stays local (the
+// engine grounds the body; the two clients can disagree about a floor).
+float Replicator::censusGlideStep(Character* c, const EntityState& st, const Key& k,
+                                  const CensusPos& cp, float d, unsigned long nowP) {
+    CensusGlide& g = censusGlide_[k];
+    float dtS = (g.ms != 0 && nowP - g.ms < 500) ? (float)(nowP - g.ms) / 1000.0f : 0.016f;
+    g.ms = nowP;
+    float dx = cp.x - st.x, dz = cp.z - st.z;
+    float inv = (d > 0.001f) ? 1.0f / d : 0.0f;
+    float ux = dx * inv, uz = dz * inv;
+    const float sm = simMult();
+    float v = d / 1.0f;
+    if (v < 10.0f) v = 10.0f;
+    if (v > 250.0f * sm) v = 250.0f * sm;
+    float step = v * dtS;
+    if (step > d) step = d;
+    EntityState pe = st;
+    // Height moves with the horizontal step, the same fraction of the way to the
+    // census row's height: a body gliding uphill at a FIXED local height walked
+    // into the slope (2026-11-19: "a monster fell under the ground").
+    const float frac = (d > 0.001f) ? step / d : 1.0f;
+    pe.x = st.x + ux * step; pe.y = st.y + (cp.y - st.y) * frac; pe.z = st.z + uz * step;
+    pe.heading = std::atan2(ux, uz);
+    engine::applyRaw(c, pe);
+    if (visualPoseMode() > 1) engine::setVisualPose(c, pe.x, pe.y, pe.z, pe.heading);
+    engine::applyMotion(c, true, v, ux * v, 0.0f, uz * v);
+    ++censusGlideFrames_;
+    return d;
 }
 
 float Replicator::parkDivergedCopy(Character* c, const EntityState& st, const Key& k) {
@@ -1759,6 +1844,25 @@ float Replicator::parkDivergedCopy(Character* c, const EntityState& st, const Ke
     std::map<Key, CensusFix>::iterator cf = censusFix_.find(k);
     bool walkingNow = cf != censusFix_.end() && cf->second.walkMs != 0 &&
                       (nowP - cf->second.walkMs) < 1500;
+    // Census glide (puppet mode 2, 2026-11-18): a diverged far copy is moved
+    // smoothly onto the census position every frame - walk clip mirrored,
+    // facing its travel - instead of walk-ordered, frozen standing (83 FREEZE/min
+    // in the field) and teleported. Once gliding it follows down to 5 u.
+    // At 5x a far body covers ~450 u between two 1 Hz census rows: the band and
+    // the glide speed follow the game speed, or every row past 400 u became a
+    // teleport (2026-11-19 session, 00:51-00:54 at 5x).
+    if (npcPuppetMode() >= 2 && censusWalkDist_ > 0.0f && d <= censusWalkDist_ * simMult() &&
+        !((engine::readBodyState(c) & (BODY_RAGDOLL | BODY_DOWN | BODY_DEAD)) != 0)) {
+        std::map<Key, CensusGlide>::iterator gi = censusGlide_.find(k);
+        const bool gliding = gi != censusGlide_.end() && (nowP - gi->second.ms) < 1500;
+        if (d > (gliding ? 5.0f : censusParkDist_ * 0.5f))
+            return censusGlideStep(c, st, k, it->second, d, nowP);
+        if (gliding) {
+            engine::applyMotion(c, false, 0.0f, 0.0f, 0.0f, 0.0f);
+            censusGlide_.erase(gi);
+        }
+        return d;
+    }
     if (d <= (walkingNow ? censusParkDist_ * 0.5f : censusParkDist_)) {
         // Converged. Drop the walk destination so the next real divergence
         // issues a fresh one, and clear the futile streak - a body that closed
@@ -2024,7 +2128,12 @@ void Replicator::censusFreezeDivergedAi(Character* c, const Key& k, float drift)
     std::map<Key, CensusFix>::iterator wf = censusFix_.find(k);
     bool walking = wf != censusFix_.end() && wf->second.walkMs != 0 &&
                    (now - wf->second.walkMs) < 1500;
-    if (!walking) engine::haltMovement(c);
+    // A census-gliding body is moved by us this frame too (and its walk clip
+    // set): halting it would freeze the clip on a body that is translating.
+    std::map<Key, CensusGlide>::iterator gl = censusGlide_.find(k);
+    const bool gliding = gl != censusGlide_.end() && (now - gl->second.ms) < 250;
+    if (!walking && !gliding) engine::haltMovement(c);
+    if (gliding) return;                         // not "frozen standing": no log line
     static unsigned long logTick = 0;           // main-thread only, ~4 lines/s
     if ((now - logTick) >= 250) {
         logTick = now;

@@ -170,6 +170,44 @@ void logSeatResolveOnce(const char* side, int task, u32 npcIdx, u32 npcSer,
 namespace {
 // SEH-guarded capture of a single Character into an EntityState. Kept in its own
 // __try frame (no C++ unwinding objects) so a bad pointer degrades to a skip.
+// "[own] task": every change of what one of OUR squad characters is doing, with
+// the engine's own description, the subject and where it is heading. Field
+// report 2026-11-20: "my characters had no jobs and ran off to another town" -
+// the logs had nothing on a local character's goal. At most 8 lines a second.
+static void ownTaskTrace(Character* c, int key, const char* desc,
+                         unsigned int subjI, unsigned int subjS, const EntityState* e) {
+    struct Slot { Character* c; int key; unsigned int si, ss; };
+    static Slot s_slot[64];
+    static unsigned int s_n = 0, s_next = 0;
+    static DWORD s_sec = 0; static unsigned int s_cnt = 0;
+    __try {
+        if (!c || !e || !c->isPlayerCharacter()) return;
+        Slot* sl = 0;
+        for (unsigned int i = 0; i < s_n; ++i) if (s_slot[i].c == c) { sl = &s_slot[i]; break; }
+        if (sl && sl->key == key && sl->si == subjI && sl->ss == subjS) return;
+        const int was = sl ? sl->key : -2;
+        if (!sl) {
+            if (s_n < 64) sl = &s_slot[s_n++];
+            else { sl = &s_slot[s_next]; s_next = (s_next + 1) % 64; }
+            sl->c = c;
+        }
+        sl->key = key; sl->si = subjI; sl->ss = subjS;
+        const DWORD now = GetTickCount();
+        if (now - s_sec >= 1000) { s_sec = now; s_cnt = 0; }
+        if (++s_cnt > 8) return;
+        float dx = 0.0f, dz = 0.0f;
+        CharMovement* mv = c->movement;
+        if (mv) { Ogre::Vector3 d = mv->getDestination(); dx = d.x; dz = d.z; }
+        char b[320];
+        _snprintf(b, sizeof(b) - 1,
+                  "[own] task hand=%u,%u was=%d now=%d desc='%.80s' subj=%u,%u "
+                  "pos=%.0f,%.0f dest=%.0f,%.0f speed=%.1f",
+                  e->hIndex, e->hSerial, was, key, desc ? desc : "", subjI, subjS,
+                  e->x, e->z, dx, dz, e->cSpeed);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 bool captureOne(Character* c, EntityState* e) {
     __try {
         const hand& h = c->handle;
@@ -210,6 +248,7 @@ bool captureOne(Character* c, EntityState* e) {
                     const std::string* ds = g_taskerDescFn(t);
                     if (ds) desc = ds->c_str();
                 }
+                ownTaskTrace(c, k, desc, t->subject.index, t->subject.serial, e);
                 logTaskKeyOnce(k, t->subject.index != 0 || t->subject.serial != 0, desc);
                 // Only stream anchored rest poses; everything else stays TASK_NONE
                 // so the receiver parks instead of reproducing a moving task.
@@ -228,6 +267,7 @@ bool captureOne(Character* c, EntityState* e) {
                                        e->x, e->y, e->z);
                 }
             }
+            else ownTaskTrace(c, -1, 0, 0, 0, e);
         }
         // Stage 2: body-state flags (down/KO/ragdoll/dead/crawl). 0 = upright. Read
         // last so a fault here can't lose the transform we already captured.
@@ -411,6 +451,13 @@ bool applyRaw(Character* c, const EntityState& e) {
         CharMovement* mv = c->movement;
         if (!mv) return false;
         Ogre::Vector3 pos(e.x, e.y, e.z);
+        // Never place a body under the terrain (2026-11-19, join: a gorilla was
+        // fought "under the ground" and only surfaced when it died). The owner's
+        // Y can be stale or come from a pose our terrain does not match; nothing
+        // in Kenshi lives below the heightmap, so lift it to the surface.
+        float groundY = 0.0f;
+        if (terrainHeightAt(pos.x, pos.z, &groundY) && pos.y < groundY - 5.0f)
+            pos.y = groundY;
         Ogre::Quaternion rot(Ogre::Radian(e.heading), Ogre::Vector3::UNIT_Y);
         mv->_setPositionDirectionAndTeleport(pos, rot);
         return true;
@@ -1128,6 +1175,61 @@ void restoreNpc(GameWorld* gw, Character* c) {
         g_addUpdateFn(gw, c);
         static_cast<RootObject*>(c)->setVisible(true);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+bool readVisible(Character* c, bool* out) {
+    if (!c || !out) return false;
+    __try {
+        *out = static_cast<RootObject*>(c)->getVisible();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool readYaw(Character* c, float* out) {
+    if (!c || !out) return false;
+    __try {
+        *out = c->getOrientation().getYaw().valueRadians();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool setVisualPose(Character* c, float x, float y, float z, float heading) {
+    if (!c) return false;
+    __try {
+        Ogre::Quaternion rot(Ogre::Radian(heading), Ogre::Vector3::UNIT_Y);
+        c->teleportVisuallyOnly(Ogre::Vector3(x, y, z), rot);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool readFacing(Character* c, float* fx, float* fz) {
+    if (!c || !fx || !fz) return false;
+    __try {
+        CharMovement* mv = c->movement;
+        if (!mv) return false;
+        const Ogre::Vector3& d = mv->direction;
+        *fx = d.x; *fz = d.z;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool isPlayerSquadHand(GameWorld* gw, const unsigned int hand[5]) {
+    if (!gw || !hand) return false;
+    Character* c = resolveCharByHand(hand[3], hand[4], hand[0], hand[1], hand[2]);
+    if (!c) return false;
+    __try {
+        return isPlayerSquad(gw, static_cast<RootObject*>(c));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
     }
 }
 

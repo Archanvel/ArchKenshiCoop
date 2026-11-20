@@ -269,6 +269,32 @@ void NetLink::queueTrade(const TradeHeader& hdr, const InvItemEntry* items, unsi
 
 void NetLink::queueFaction(const FactionPacket& pkt) { pushLocked(outCs_, outFaction_, pkt); }
 
+std::string NetLink::localIpv4() {
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return std::string();
+    std::string best;
+    char host[256];
+    if (gethostname(host, sizeof(host) - 1) == 0) {
+        host[sizeof(host) - 1] = 0;
+        hostent* he = gethostbyname(host);
+        if (he && he->h_addrtype == AF_INET) {
+            for (int i = 0; he->h_addr_list[i] != 0; ++i) {
+                in_addr a; memcpy(&a, he->h_addr_list[i], sizeof(a));
+                const unsigned char* b = (const unsigned char*)&a;
+                char t[32]; _snprintf(t, sizeof(t) - 1, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+                t[sizeof(t) - 1] = 0;
+                if (b[0] == 127) continue;
+                // A home-router address (192.168.x.x) is the one a friend on the same
+                // network needs; prefer it over VPN / virtual adapters.
+                if (b[0] == 192 && b[1] == 168) { best = t; break; }
+                if (best.empty()) best = t;
+            }
+        }
+    }
+    WSACleanup();
+    return best;
+}
+
 void NetLink::queueTime(const TimePacket& pkt) { pushLocked(outCs_, outTime_, pkt); }
 
 void NetLink::queueDoor(const DoorPacket& pkt) { pushLocked(outCs_, outDoor_, pkt); }

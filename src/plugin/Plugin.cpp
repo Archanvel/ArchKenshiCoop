@@ -39,6 +39,7 @@
 #include "net/SteamInvite.h"
 #include "game/Engine.h"
 #include "game/EngineUi.h"       // Phase 5a: F2 co-op panel + status overlay
+#include "game/EngineProbe.h"    // installFloaterTraceHook (KENSHICOOP_DEBUG_FLOATERS)
 #include "game/ReKenshiFocus.h" // RE_Kenshi alt-tab fault guard
 #include "devtools/DevTools.h"   // developer tools (docs/DEVTOOLS.md), off unless "devtools": 1
 #include "devtools/PacketRecorder.h"
@@ -90,6 +91,7 @@ static int coopInvOwnerClass(const unsigned int h[5]) {
 // combat-hit report rides on that detour, and startNetworking re-latches it per
 // role, so it needs to know the hook is really there.
 static bool g_dmgHookOk = false;
+static bool g_floaterShare = false; // protocol 68 damage-number sharing (addWound detour)
 
 static bool vendorRefreshGate(unsigned int platContainer, unsigned int platSerial) {
     return g_repl.vendorRefreshGated(platContainer, platSerial);
@@ -279,6 +281,48 @@ void (*g_titleUpdate_orig)(TitleScreen*)   = 0;
 void startNetworking();
 void coopUiConnect(bool isHost, bool useSteam, unsigned long long peerId);
 void coopUiDisconnect();
+// Main-menu "play by IP": the address typed in the lobby wins over the config file
+// for the next connect, and is remembered in coop_last_ip.txt next to the DLL.
+std::string g_ipOverride;
+static std::string lastIpFilePath() {
+    char buf[MAX_PATH];
+    HMODULE h = GetModuleHandleA("KenshiCoop.dll");
+    DWORD n = GetModuleFileNameA(h, buf, MAX_PATH);
+    if (h == 0 || n == 0 || n >= MAX_PATH) return "coop_last_ip.txt";
+    std::string p(buf, n);
+    size_t slash = p.find_last_of("\\/");
+    p = (slash != std::string::npos) ? p.substr(0, slash + 1) : std::string();
+    return p + "coop_last_ip.txt";
+}
+static std::string readLastIp() {
+    std::string out;
+    FILE* f = fopen(lastIpFilePath().c_str(), "rb");
+    if (f) {
+        char b[96]; size_t n = fread(b, 1, sizeof(b) - 1, f); fclose(f);
+        b[n] = 0;
+        for (size_t i = 0; i < n; ++i) {
+            char ch = b[i];
+            if ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                ch == '.' || ch == '-' || ch == ':') out += ch;
+            else break;
+        }
+    }
+    return out;
+}
+static void lobbyHostDirect() {
+    g_ipOverride.clear();
+    coop::logLine("[lobby] host by IP (UDP)");
+    coopUiConnect(true, false, 0);
+}
+static void lobbyJoinDirect(const char* ip) {
+    if (!ip || !ip[0]) return;
+    g_ipOverride = ip;
+    FILE* f = fopen(lastIpFilePath().c_str(), "wb");
+    if (f) { fwrite(ip, 1, strlen(ip), f); fclose(f); }
+    char b[160]; _snprintf(b, sizeof(b) - 1, "[lobby] join by IP (UDP) %s", ip);
+    b[sizeof(b) - 1] = 0; coop::logLine(b);
+    coopUiConnect(false, false, 0);
+}
 
 // Log to BOTH our dedicated per-line-flushed file (what the test runner reads)
 // and the engine's kenshi.log (handy when attached live).
@@ -1472,12 +1516,24 @@ void lobbyDrive(const std::vector<coop::engine::CoopPanelFriend>& friends, const
     ls.saves        = saves.empty() ? 0 : &saves[0];
     ls.saveCount    = (int)saves.size();
     ls.joinedSerial = si::joinedSerial();
+    static std::string s_localIp, s_lastIp;
+    static bool s_ipInit = false;
+    if (!s_ipInit) {
+        s_ipInit = true;
+        s_localIp = coop::NetLink::localIpv4();
+        s_lastIp  = readLastIp();
+        if (s_lastIp.empty() && g_cfg.ip != "127.0.0.1") s_lastIp = g_cfg.ip;
+    }
+    ls.localIp = s_localIp.c_str();
+    ls.lastIp  = s_lastIp.c_str();
 
     coop::engine::LobbyActions la;
     la.host     = &si::hostLobby;
     la.invite   = &si::inviteFriend;
     la.join     = &si::joinFriend;
     la.leave    = &coopUiDisconnect;
+    la.hostDirect = &lobbyHostDirect;
+    la.joinDirect = &lobbyJoinDirect;
     la.loadSave = &lobbyLoadSave;
     la.avatar   = &si::avatarRGBA;
     coop::engine::lobbyTick(&ls, &la);
@@ -1624,8 +1680,11 @@ void coopPanelDrive(bool atTitle) {
         detail = "Paused by another player";
         ostate = 1;
     }
+    // A short notice from the sync layer (a merchant the other player holds).
+    const char* notice = g_repl.uiNoticeNow();
+    if (notice && !loadHold && !peerHold) { detail = notice; ostate = 1; }
     coop::engine::coopOverlayTick(detail.c_str(), ostate,
-                                  loadHold || peerHold ||
+                                  loadHold || peerHold || notice != 0 ||
                                   (s_banner == 1 && (g_net.isRunning() || lobbyHosting)));
     if (atTitle) lobbyDrive(s_friends, transfer);
     else         coop::engine::lobbyTestTick();
@@ -2028,6 +2087,13 @@ static void tickCharGen(GameWorld* gw, bool worldLive) {
         const coop::InboundCharGen& g = got[i];
         if (g.hdr.ownerId == g_net.localId()) continue;
         const unsigned int* h = g.hdr.hand;
+        // Protocol 68 spawn look: the HOST names a world-NPC key (never a squad
+        // member) with that body's appearance. Only a join takes one, and only
+        // onto the proxy / adopted body the replicator bound to that key.
+        if (!g_cfg.isHost && g_repl.ownerClassForHand(h) != 2) {
+            g_repl.noteNpcLook(h, g.name, g.raceSid, g.bod2);
+            continue;
+        }
         Character* c = coop::engine::resolveCharByHand(h[3], h[4], h[0], h[1], h[2]);
         if (!c) { chargenLog("APPLY-FAIL(unresolved)", g.hdr.ownerId, 0, 0); continue; }
         // Only a squad member another player owns takes a peer's look - never one
@@ -2167,7 +2233,10 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
         // CharCreate: while the join's character editor is open the edited bodies
         // sit on the editor platform at the world origin - don't publish that.
         if (!g_chargenSuppressPublish)
+        {
             g_repl.publishOwned(gw, g_net, g_net.localId());
+            if (g_floaterShare) g_repl.publishFloaters(g_net, g_net.localId());
+        }
         // Phase W2: BOTH clients watch their OWNED characters for a WEAPON drop and author a
         // reliable conservation intent so the peer relocates its own copy of that weapon (a
         // weapon can't be rebuilt via the W1 proxy path). Bidirectional; gated on worldSync.
@@ -2684,7 +2753,8 @@ void mainLoop_hook(GameWorld* gw, float dt) {
         // Healing-rate multiplier (coop_config.json "healMult"). The detour is
         // installed only when the value is not vanilla, so a default install
         // carries no extra hook on the medical path at all.
-        if (g_cfg.healMult > 1.001f || g_cfg.healMult < 0.999f) {
+        if (g_cfg.healMult > 1.001f || g_cfg.healMult < 0.999f ||
+            g_cfg.bedHealMult > 1.001f || g_cfg.bedHealMult < 0.999f) {
             char hb[112];
             bool hok = coop::engine::installHealHook();
             _snprintf(hb, sizeof(hb) - 1,
@@ -3097,6 +3167,7 @@ void coopUiConnect(bool isHost, bool useSteam, unsigned long long peerId) {
     // hitting Connect works without restarting the game. (It also picks up a
     // steamPeer if one is set for advanced/back-compat use.)
     if (g_cfg.testLobbyRole == 0) coop::reloadPeerFromFile(g_cfg); // harness: keep the env endpoint
+    if (!useSteam && !isHost && !g_ipOverride.empty()) g_cfg.ip = g_ipOverride; // typed in the lobby
     // A Steam ID pasted in the F2 panel this session wins over the config: the
     // normal flow is Copy my Steam ID -> friend Pastes it -> Connect, with no file
     // editing. peerId is 0 when nothing was pasted, so the config value stands.
@@ -3269,6 +3340,7 @@ void configureReplicator() {
         g_repl.setSpeedPolicy(g_cfg.speedPolicy);
         g_repl.setJoinLoadPause(g_cfg.joinLoadPause);
         coop::engine::setHealMult(g_cfg.healMult);
+        coop::engine::setBedHealMult(g_cfg.bedHealMult);
         g_repl.setStarveHold(g_cfg.starveHoldMs);
         // Camera-anchored interest (protocol 43): engine-side master enable
         // for the camera anchors in interestCenters.
@@ -3284,6 +3356,24 @@ void configureReplicator() {
         // the two sides' enumerated sets, hand by hand, with the authority class
         // each side assigned. The aggregate counters cannot: a creature visible
         // on one client and absent on the other leaves every bucket balanced.
+        g_repl.setProxyTelemetry(!g_cfg.scenario.empty());
+        {
+            // "auto": Russian when Kenshi itself runs in Russian (settings.cfg
+            // language=ru_RU) - that is also when its fonts can draw Cyrillic.
+            bool ru = (g_cfg.uiLang == "ru" || g_cfg.uiLang == "RU");
+            if (g_cfg.uiLang == "auto") {
+                FILE* sf = fopen("settings.cfg", "rb");
+                if (sf) {
+                    char line[256];
+                    while (fgets(line, sizeof(line), sf))
+                        if (strncmp(line, "language=ru", 11) == 0) { ru = true; break; }
+                    fclose(sf);
+                }
+            }
+            g_repl.setUiRussian(ru);
+            coop::engine::lobbySetRussian(ru);
+            coop::logLine(ru ? "[coop-ui] language: ru" : "[coop-ui] language: en");
+        }
         g_repl.setAuditRows(g_cfg.scenario == "travel_parity" ||
                             g_cfg.scenario == "split_far" ||
                             g_cfg.scenario == "run_apart" ||
@@ -3329,6 +3419,7 @@ void configureReplicator() {
     // both players spend from. KENSHICOOP_MONEY_SYNC=0 is the A/B escape hatch
     // (and the shop_probe baseline).
     g_repl.setMoneySync(g_cfg.moneySync);
+    g_repl.setSellMult(g_cfg.sellMult);
 
     // Runtime-spawn proxy replication (protocol 21, default ON): the join mints
     // local proxy bodies for host runtime spawns it cannot resolve by hand.
@@ -3399,6 +3490,21 @@ void installEngineDetours() {
     if (!g_cfg.isHost && g_cfg.gateAuthority) {
         g_repl.setGateAuthority(true);
         coopLog("[trust] divergence-gated authority ON (default; KENSHICOOP_GATE_AUTHORITY=0 disables)");
+    }
+
+    {
+#ifdef KENSHICOOP_HARNESS
+        const char* fl = getenv("KENSHICOOP_DEBUG_FLOATERS");
+        if (fl && fl[0] == '1') coop::engine::installFloaterTraceHook();
+#endif
+        // Damage-number sharing (protocol 68, default ON; KENSHICOOP_FLOATER_SYNC=0
+        // disables): both sides ship the numbers their own sim raised.
+        const char* fs = getenv("KENSHICOOP_FLOATER_SYNC");
+        if (!(fs && fs[0] == '0')) {
+            g_floaterShare = coop::engine::installFloaterShareHook();
+            coopLog(g_floaterShare ? "[floater] addWound detour installed; damage-number sharing ON"
+                                   : "[floater] addWound detour FAILED; damage-number sharing off");
+        }
     }
 
     // Damage guard (BOTH sides, DEFAULT ON): locally-simulated melee hits on

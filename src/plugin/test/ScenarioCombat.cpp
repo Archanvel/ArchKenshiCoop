@@ -2220,9 +2220,17 @@ const float AssaultTravelScenario::TRAVEL_SPEED_MULT = 5.0f;
 // Judged by Test-HostPcFight.
 class HostPcFightScenario : public TimedScenario {
 public:
-    explicit HostPcFightScenario(bool mint)
-        : TimedScenario(mint ? "host_pc_fight_mint" : "host_pc_fight", 500),
-          mint_(mint), haveOwn_(false), havePeer_(false), haveVic_(false),
+    // retreat (host_pc_retreat, 2026-11-18 field report: "while running in a fight the
+    // friend's character faced the enemies chasing it"): the mint fight, then at
+    // RETREAT_AT_MS each side sends its own leader running RETREAT_DIST away while
+    // the host keeps the enemies on both leaders. A 10 Hz "SCENARIO FACE" series
+    // (position + yaw, own body and peer copy) lets the oracle compare each body's
+    // facing with its direction of travel.
+    explicit HostPcFightScenario(bool mint, bool retreat = false, bool retreatOff = false)
+        : TimedScenario(retreat ? (retreatOff ? "host_pc_retreat_off" : "host_pc_retreat")
+                                : (mint ? "host_pc_fight_mint" : "host_pc_fight"), 500),
+          mint_(mint || retreat), retreat_(retreat), retreatSet_(false), rtx_(0), rty_(0), rtz_(0),
+          lastFaceMs_(0), lastRunOrderMs_(0), haveOwn_(false), havePeer_(false), haveVic_(false),
           havePeerVic_(false), haveFled_(false),
           issued_(false), pickFailLogged_(false), spawned_(false), buffed_(false),
           nEnemies_(0), lastOrderMs_(0) {
@@ -2247,6 +2255,7 @@ public:
             if (haveOwn_)  logPc(ctx, ownHand_, ctx.isHost);
             if (havePeer_) logPc(ctx, peerHand_, !ctx.isHost);
         }
+        if (retreat_) tickRetreat(ctx);
         unsigned long dur = ctx.isHost ? HOST_DURATION_MS : JOIN_DURATION_MS;
         if (ctx.elapsedMs >= dur) {
             // Script-ran verdict only (the cross-client judgement is the oracle's):
@@ -2363,7 +2372,9 @@ private:
         if (lastOrderMs_ != 0 && (ctx.elapsedMs - lastOrderMs_) < ORDER_EVERY_MS) return;
         lastOrderMs_ = ctx.elapsedMs;
         int mine = firstUprightEnemy(0);
-        if (mine >= 0) {
+        if (mine >= 0 && retreating(ctx)) {
+            engine::orderAttackByHand(ctx.gw, enemy_[mine], ownHand_); // keep chasing us
+        } else if (mine >= 0) {
             bool ok = engine::orderAttackByHand(ctx.gw, ownHand_, enemy_[mine]);
             engine::orderAttackByHand(ctx.gw, enemy_[mine], ownHand_);
             noteIssued(ctx, enemy_[mine], enemy_[mine], ok);
@@ -2377,6 +2388,7 @@ private:
     // the host logs it by).
     void tickMintJoin(const ScenarioContext& ctx) {
         if (!haveOwn_ || !ctx.pickMintedProxy || ctx.elapsedMs < FIGHT_AT_MS) return;
+        if (retreating(ctx)) return;
         if (lastOrderMs_ != 0 && (ctx.elapsedMs - lastOrderMs_) < ORDER_EVERY_MS) return;
         lastOrderMs_ = ctx.elapsedMs;
         unsigned int local[5], canon[5];
@@ -2391,6 +2403,52 @@ private:
         if (d > MINT_FIGHT_DIST) return;
         bool ok = engine::orderAttackByHand(ctx.gw, ownHand_, local);
         noteIssued(ctx, local, canon, ok);
+    }
+
+    bool retreating(const ScenarioContext& ctx) const {
+        return retreat_ && ctx.elapsedMs >= RETREAT_AT_MS;
+    }
+
+    // Retreat variant: run the own leader to a point RETREAT_DIST along +x of where
+    // it stood when the retreat began (both leaders the same way, so they stay in
+    // each other's stream bubble), re-ordered on the attack cadence; plus the
+    // 10 Hz facing series for both leaders from the start of the fight.
+    void tickRetreat(const ScenarioContext& ctx) {
+        if (ctx.elapsedMs >= FIGHT_AT_MS && ctx.elapsedMs - lastFaceMs_ >= 100) {
+            lastFaceMs_ = ctx.elapsedMs;
+            if (haveOwn_)  logFace(ctx, ownHand_, true);
+            if (havePeer_) logFace(ctx, peerHand_, false);
+        }
+        if (!retreating(ctx) || !haveOwn_) return;
+        Character* l = engine::resolveCharByHand(ownHand_[3], ownHand_[4], ownHand_[0],
+                                                 ownHand_[1], ownHand_[2]);
+        if (!l) return;
+        float x = 0, y = 0, z = 0;
+        if (!engine::readPos(l, &x, &y, &z)) return;
+        if (!retreatSet_) {
+            retreatSet_ = true; rtx_ = x + RETREAT_DIST; rtz_ = z; rty_ = y;
+            engine::clearGoals(l);
+            char b[128]; _snprintf(b, sizeof(b) - 1, "SCENARIO FACE retreat start side=%s",
+                                   ctx.isHost ? "host" : "join");
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        if (ctx.elapsedMs - lastRunOrderMs_ >= ORDER_EVERY_MS) {
+            lastRunOrderMs_ = ctx.elapsedMs;
+            engine::walkTo(l, rtx_, rty_, rtz_, 0.5f); // < 1 = run
+        }
+    }
+
+    void logFace(const ScenarioContext& ctx, const unsigned int pc[5], bool own) {
+        Character* c = engine::resolveCharByHand(pc[3], pc[4], pc[0], pc[1], pc[2]);
+        float x = 0, y = 0, z = 0, yaw = 0;
+        if (!c || !engine::readPos(c, &x, &y, &z) || !engine::readYaw(c, &yaw)) return;
+        engine::CombatRead cr;
+        bool fight = engine::readCombat(c, &cr) && (cr.inCombat || cr.modeActive);
+        char b[192]; _snprintf(b, sizeof(b) - 1,
+            "SCENARIO FACE t=%lu pc=%u,%u view=%s pos=%.1f,%.1f yaw=%.3f fight=%d run=%d",
+            ctx.elapsedMs, pc[3], pc[4], own ? "own" : "copy", x, z, yaw, fight ? 1 : 0,
+            retreating(ctx) ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
 
     // The enemies get the fighters' stat line too: an even match is a fight that
@@ -2521,7 +2579,14 @@ private:
         }
     }
 
+    static const unsigned long RETREAT_AT_MS = 42000;
+    static const float         RETREAT_DIST;
     const bool    mint_;
+    const bool    retreat_;
+    bool          retreatSet_;
+    float         rtx_, rty_, rtz_;
+    unsigned long lastFaceMs_;
+    unsigned long lastRunOrderMs_;
     bool          haveOwn_;
     bool          havePeer_;
     bool          haveVic_;
@@ -2548,6 +2613,7 @@ const float HostPcFightScenario::FIGHTER_STATS = 120.0f;
 const float HostPcFightScenario::MINT_FIGHT_DIST = 40.0f;
 // Past pickCombatVictim's 30 u pick radius plus a melee lunge: the victim is running.
 const float HostPcFightScenario::FLEE_DIST = 45.0f;
+const float HostPcFightScenario::RETREAT_DIST = 900.0f;
 
 // ===========================================================================
 // bandit_chase / bandit_chase_host (field report, cellAuth ON as shipped): "a
@@ -3045,6 +3111,8 @@ Scenario* makeCombatScenario(const std::string& name) {
     if (name == "pc_assault")   return new PcAssaultScenario();
     if (name == "host_pc_fight")      return new HostPcFightScenario(false);
     if (name == "host_pc_fight_mint") return new HostPcFightScenario(true);
+    if (name == "host_pc_retreat" || name == "host_pc_retreat_off")
+        return new HostPcFightScenario(true, true, name == "host_pc_retreat_off");
     if (name == "bandit_chase")      return new BanditChaseScenario("bandit_chase", true);
     if (name == "bandit_chase_host") return new BanditChaseScenario("bandit_chase_host", false);
     return 0;

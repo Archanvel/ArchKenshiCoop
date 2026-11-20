@@ -693,6 +693,44 @@
             Advisory = @('smoothness', 'anim_truth')
             Tier = 'full'; WanVariant = $false
         }
+        # peer_crash: the join hard-kills its process at 20 s (a crash, no goodbye);
+        # the host must survive the next 60 s. Judged by result_host (join FAILs).
+        peer_crash = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'clock_sync'
+            Gating   = @()
+            Advisory = @()
+            Tier = 'probe'; WanVariant = $false
+        }
+        # ghost_ambush: the join spawns a hostile squad the host never had right next to
+        # its leader; it must be hidden within 1.5 s and stay hidden (join verdict).
+        ghost_ambush = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'clock_sync'
+            Gating   = @('clock_sync')
+            Advisory = @()
+            Tier = 'full'; WanVariant = $false
+        }
+        # ghost_ambush_split: ghost_ambush under presence authority (cellAuth ON, the
+        # pre-fix7 default) - EXPECTED TO FAIL: the join authors its own cell and
+        # never hides the ghosts there (the field report's phantom attackers).
+        ghost_ambush_split = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'clock_sync'
+            Gating   = @('clock_sync')
+            Advisory = @()
+            DiagEnv  = @{ KENSHICOOP_CELL_AUTH = '1' }
+            Tier = 'probe'; WanVariant = $false
+        }
+        # ghost_ambush_far: the same squad parked 1500 u out and sent at the join leader
+        # (a native ambush running in from afar).
+        ghost_ambush_far = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'clock_sync'
+            Gating   = @('clock_sync')
+            Advisory = @()
+            Tier = 'full'; WanVariant = $false
+        }
         # corpse_pos: the join's corpse is shoved 250 u off; the replicator must put
         # the ragdoll back on the host's spot (join verdict, endD <= 40 u).
         corpse_pos = @{
@@ -2295,6 +2333,25 @@
             Advisory = @('smoothness', 'anim_truth', 'march')
             Tier = 'full'; WanVariant = $false
         }
+        # host_pc_retreat: host_pc_fight_mint, then both leaders run 900 u away with the
+        # enemies chasing; SCENARIO FACE (10 Hz pos + yaw, own and copy) is the evidence
+        # for "the running copy faces its pursuers" (field report 2026-11-18).
+        host_pc_retreat = @{
+            Save = 'sync'; Setup = ''; Tolerance = 20.0
+            PrimaryGate = 'clock_sync'
+            Gating   = @('clock_sync')
+            Advisory = @()
+            Tier = 'full'; WanVariant = $false
+        }
+        # host_pc_retreat_off: the same with the combat run-glide disabled (the old drive).
+        host_pc_retreat_off = @{
+            Save = 'sync'; Setup = ''; Tolerance = 20.0
+            PrimaryGate = 'clock_sync'
+            Gating   = @('clock_sync')
+            Advisory = @()
+            DiagEnv  = @{ KENSHICOOP_COMBAT_RUN_GLIDE = '0' }
+            Tier = 'probe'; WanVariant = $false
+        }
         # host_pc_fight_mint: the same two-way fight against a host RUNTIME spawn
         # (combat_win's setup): the join has to MINT the enemies, so the host PC's
         # streamed target is a hand that never resolves on the join.
@@ -2534,6 +2591,18 @@
         # corpse_loot gates shared corpse inventories (upstream #40): the host kills an NPC,
         # seeds probe units and loots one, the join loots one from its own copy - both
         # sides must end on the same corpse count and each looted unit exist exactly once.
+        # corpse_loot_extra: the join's corpse copy holds 4 local-only units (its own
+        # loot roll) and the join takes everything it sees. Judged from the CORPSE
+        # lines by hand: nothing may be created (join bag gain <= the host corpse's
+        # loss) and nothing the host really had may be lost.
+        corpse_loot_extra = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_INV_DUMP = '1' }
+            Save = 'down1'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = 'clock_sync'
+            Gating   = @('clock_sync')
+            Advisory = @()
+            Tier = 'full'; WanVariant = $false
+        }
         corpse_loot = @{
             DiagEnv = @{ KENSHICOOP_INV_SYNC = '1'; KENSHICOOP_INV_DUMP = '1' }
             Save = 'down1'; Setup = ''; Tolerance = 3.0
@@ -2796,6 +2865,19 @@
             Gating   = @()
             Advisory = @()
             Tier = 'none'; WanVariant = $false   # veto-path diagnostic
+        }
+        # xfer_rapid (2026-11-19 (2) field report): the join drags like a player -
+        # the item sits on the cursor between pick and drop, and the next drag
+        # starts before the last one was reported. 9 takes and 4 gives between the
+        # two leaders; both clients must end with every unit conserved (in-plugin
+        # verdict, SCENARIO XFR).
+        xfer_rapid = @{
+            DiagEnv = @{ KENSHICOOP_INV_SYNC = '1' }
+            Save = 'squad1'; Setup = ''; Tolerance = 3.0
+            PrimaryGate = ''
+            Gating   = @()
+            Advisory = @()
+            Tier = 'none'; WanVariant = $false
         }
         spike = @{
             Save = 'c'; Setup = ''; Tolerance = 3.0

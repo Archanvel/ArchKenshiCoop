@@ -46,6 +46,7 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
     // Host reply throttle: a re-request inside this window is a duplicate in
     // flight, not a new question.
     const unsigned long REPLY_THROTTLE_MS = 2000;
+    if (!isHost) applyPendingLooks(gw); // protocol 68: host looks for bound proxies
     // Proximity gate: only ask about unresolved hands streamed NEAR our own
     // squad (the interest capture radius is 200u). A far unresolved hand is
     // usually a BAKED NPC in a world block this client hasn't loaded yet -
@@ -108,7 +109,63 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
                     (unsigned)proxyByKey_.size() - 1);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
                 spawnReq_.erase(bk); // hand resolves now - no REQ needed again
+                // Forget that the unbound body ever answered to bk. The drive
+                // had recorded it under that key (canonicalOf_), so every
+                // authority pass kept naming the adopted body bk and parked it
+                // onto the original's census position each frame while the
+                // drive moved the original: two bodies on one spot, the pair
+                // jittering (world_parity 20261119_032604: 155 MID<->PARKED
+                // flips in 12 ms pairs on one Holy Sentinel).
+                // (By pointer value only - a destroyed proxy is not touched.)
+                {
+                    std::map<Character*, Key>::iterator co = canonicalOf_.find(it->second);
+                    if (co != canonicalOf_.end() && !(co->second < bk) && !(bk < co->second))
+                        canonicalOf_.erase(co);
+                    drivenSeen_.erase(it->second);
+                    drivenChars_.erase(it->second);
+                }
                 lifeSet(bk, LIFE_RESOLVED, "dupe-heal");
+                proxyByKey_.erase(it++);
+                continue;
+            }
+            // Orphan release. reconcileProxy holds a proxy whose author neither
+            // streams it nor lists it in a live census, but a hold is not an end:
+            // the body stood there for good, visible and attackable (2026-11-19
+            // 15:17: a gorilla the host had unloaded a minute before stayed on the
+            // join, frozen, and the join's character and a passing NPC fought it).
+            // The census covers 2000 u around every player, so a body it has not
+            // listed for this long is not near anyone on the author's side. A
+            // minted body is destroyed; an adopted one is only unbound and falls
+            // to the ordinary ghost suppression. If the author lists it again the
+            // census-missing path mints it afresh.
+            const unsigned long ORPHAN_RELEASE_MS = 12000;
+            std::map<Key, unsigned long>::iterator om = proxyOrphanMs_.find(bk);
+            std::map<Key, unsigned long>::iterator os = proxyOrphanSeenMs_.find(bk);
+            // ...confirmed within the last few passes (the entry is only refreshed
+            // while the body is enumerated), and never a corpse: its loot is real.
+            if (om != proxyOrphanMs_.end() && (now - om->second) >= ORPHAN_RELEASE_MS &&
+                os != proxyOrphanSeenMs_.end() && (now - os->second) < 2500 &&
+                (engine::readBodyState(it->second) & BODY_DEAD) == 0) {
+                Character* body = it->second;
+                {
+                    std::map<Character*, Key>::iterator co = canonicalOf_.find(body);
+                    if (co != canonicalOf_.end() && !(co->second < bk) && !(bk < co->second))
+                        canonicalOf_.erase(co);
+                    drivenSeen_.erase(body);
+                    drivenChars_.erase(body);
+                }
+                bool destroyed = destroyIfMinted(gw, body);
+                char b[200]; _snprintf(b, sizeof(b) - 1,
+                    "[spawn] proxy ORPHAN-RELEASE hand=%u,%u,%u,%u,%u (unlisted %lums; "
+                    "%s, proxies=%u)",
+                    bk.t, bk.c, bk.cs, bk.i, bk.s, now - om->second,
+                    destroyed ? "proxy destroyed" : "adopted body unbound",
+                    (unsigned)proxyByKey_.size() - 1);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                spawnReq_.erase(bk); // a returning census row may ask again
+                proxyOrphanMs_.erase(om);
+                proxyOrphanSeenMs_.erase(bk);
+                lifeSet(bk, LIFE_UNKNOWN, "orphan-release");
                 proxyByKey_.erase(it++);
                 continue;
             }
@@ -155,6 +212,7 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
                 k.t, k.c, k.cs, k.i, k.s, pkt.found, pkt.dead, pkt.age,
                 pkt.charSid, pkt.facSid);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            if (found && isHost && spawnLookEnabled()) queueNpcLook(net, ownerId, k, c);
         }
     }
 
@@ -749,7 +807,7 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
     // proxy body's ACTUAL local position, in the SCENARIO series shape (hand
     // order i,s,t,c,cs like MEMBER/RECV lines) so the spawn_sync oracle can
     // time-pair it with the host's MEMBER series per hand.
-    if (!proxyByKey_.empty() && (now - spawnPosLogMs_) >= 500) {
+    if (proxyTelemetry_ && !proxyByKey_.empty() && (now - spawnPosLogMs_) >= 500) {
         spawnPosLogMs_ = now;
         for (std::map<Key, Character*>::iterator it = proxyByKey_.begin();
              it != proxyByKey_.end(); ++it) {
@@ -839,6 +897,135 @@ bool Replicator::bodyRoleOf(GameWorld* gw, Character* c, BodyRoleRead* out) cons
     return true;
 }
 
+// ---- Spawn looks (protocol 68, 2026-11-18 field report: "spawned characters
+// look different on the two screens"). A minted proxy is built by
+// createRandomCharacter from the template alone, so its race, face, hair and
+// body are rolled locally; an adopted twin was rolled by the join's own engine.
+// The host answers every found INFO for a human body with the body's appearance
+// GameData and name - the same .bod2 export + PKT_CHARGEN carrier the protocol-57
+// character creation uses - and the join applies it to whatever body the key is
+// bound to once that binding has settled for LOOK_SETTLE_MS.
+// The join crashed in the engine's appearance update right after looks that CHANGED
+// a proxy's race to a modded one (runs 20261118_214907 / _225926). Looks are now
+// applied same-race, base-game races only, one per 750 ms on a settled body (see
+// applyPendingLooks). Still DEFAULT OFF: cosmetic only, and not yet proven safe on
+// the heavy scenarios. KENSHICOOP_SPAWN_LOOK=1 enables it for testing.
+bool Replicator::spawnLookEnabled() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = getenv("KENSHICOOP_SPAWN_LOOK");
+        s = (e && e[0] == '1') ? 1 : 0;
+    }
+    return s == 1;
+}
+
+void Replicator::queueNpcLook(NetLink& net, u32 ownerId, const Key& k, Character* c) {
+    if (!c || !engine::chargenIsHuman(c)) return;
+    std::map<Key, std::vector<u8> >::iterator ci = lookCache_.find(k);
+    if (ci == lookCache_.end()) {
+        std::vector<unsigned char> bod2;
+        if (!engine::chargenExport(c, bod2) || bod2.empty() || bod2.size() > CHARGEN_DATA_MAX) {
+            char b[128]; _snprintf(b, sizeof(b) - 1, "[spawn] LOOK export FAILED hand=%u,%u",
+                                   k.i, k.s);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            return;
+        }
+        char nm[256], race[256];
+        engine::charName(c, nm, sizeof(nm));
+        engine::chargenRaceSid(c, race, sizeof(race));
+        CharGenHeader hdr;
+        memset(&hdr, 0, sizeof(hdr));
+        hdr.type = (u8)PKT_CHARGEN;
+        hdr.ownerId = ownerId;
+        hdr.hand[0] = k.t; hdr.hand[1] = k.c; hdr.hand[2] = k.cs;
+        hdr.hand[3] = k.i; hdr.hand[4] = k.s;
+        size_t nl = strlen(nm), rl = strlen(race);
+        hdr.nameLen = (u8)(nl > 255 ? 255 : nl);
+        hdr.raceLen = (u8)(rl > 255 ? 255 : rl);
+        hdr.dataLen = (u32)bod2.size();
+        std::vector<u8> flat(sizeof(hdr) + hdr.nameLen + hdr.raceLen + bod2.size());
+        memcpy(&flat[0], &hdr, sizeof(hdr));
+        memcpy(&flat[sizeof(hdr)], nm, hdr.nameLen);
+        memcpy(&flat[sizeof(hdr) + hdr.nameLen], race, hdr.raceLen);
+        memcpy(&flat[sizeof(hdr) + hdr.nameLen + hdr.raceLen], &bod2[0], bod2.size());
+        if (lookCache_.size() > 512) lookCache_.clear();
+        ci = lookCache_.insert(std::make_pair(k, flat)).first;
+        char b[192]; _snprintf(b, sizeof(b) - 1,
+            "[spawn] LOOK send hand=%u,%u,%u,%u,%u name='%s' race='%s' bytes=%u",
+            k.t, k.c, k.cs, k.i, k.s, nm, race, (unsigned)bod2.size());
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+    net.queueCharGen(ci->second);
+}
+
+void Replicator::noteNpcLook(const unsigned int hand[5], const std::string& name,
+                             const std::string& raceSid, const std::vector<unsigned char>& bod2) {
+    Key k; k.t = hand[0]; k.c = hand[1]; k.cs = hand[2]; k.i = hand[3]; k.s = hand[4];
+    PendingLook& pl = pendingLooks_[k];
+    pl.name = name; pl.raceSid = raceSid; pl.bod2 = bod2;
+    pl.recvMs = nowMs(); pl.boundMs = 0; pl.body = 0;
+}
+
+void Replicator::applyPendingLooks(GameWorld* gw) {
+    if (pendingLooks_.empty()) return;
+    if (!spawnLookEnabled()) { pendingLooks_.clear(); return; } // see spawnLookEnabled
+    const unsigned long now = nowMs();
+    // Run 20261118_214907: eight looks applied inside 50 ms, then the engine's
+    // appearance update faulted. Now: 3 s after the binding, only onto a body
+    // whose appearance is idle, and at most one apply per LOOK_GAP_MS.
+    const unsigned long LOOK_SETTLE_MS = 3000;
+    const unsigned long LOOK_EXPIRE_MS = 120000;
+    const unsigned long LOOK_GAP_MS    = 750;
+    if (lookApplyMs_ != 0 && now - lookApplyMs_ < LOOK_GAP_MS) return;
+    for (std::map<Key, PendingLook>::iterator it = pendingLooks_.begin();
+         it != pendingLooks_.end(); ) {
+        PendingLook& pl = it->second;
+        std::map<Key, Character*>::iterator pb = proxyByKey_.find(it->first);
+        Character* c = (pb != proxyByKey_.end()) ? pb->second : 0;
+        if (!c) {
+            if (now - pl.recvMs > LOOK_EXPIRE_MS) pendingLooks_.erase(it++);
+            else ++it;
+            continue;
+        }
+        if (pl.body != c) { pl.body = c; pl.boundMs = now; } // (re)bound: settle anew
+        if (now - pl.boundMs < LOOK_SETTLE_MS) { ++it; continue; }
+        if (!engine::chargenAppearanceIdle(c)) { ++it; continue; } // still building
+        lookApplyMs_ = now;
+        bool ok = false;
+        const char* why = "";
+        // Only a look of the SAME race the proxy already has, and only a base-game
+        // race. A race change runs setRace on the body, and both crashes measured
+        // (runs 20261118_214907 / _225926) followed looks that changed a proxy to
+        // a modded race ('5276-chareditor.mod') - the engine's appearance update
+        // faulted tens of milliseconds later. A same-race look only swaps face,
+        // hair, body shape and colours.
+        char localRace[256];
+        engine::chargenRaceSid(c, localRace, sizeof(localRace));
+        const bool vanillaRace = pl.raceSid.find("gamedata.base") != std::string::npos ||
+                                 pl.raceSid.find("gamedata.quack") != std::string::npos;
+        if (!engine::chargenIsHuman(c)) why = " (not human here)";
+        else if (pl.raceSid.empty() || !engine::chargenRaceKnown(gw, pl.raceSid.c_str()))
+            why = " (race not installed)";
+        else if (!vanillaRace) why = " (modded race: skipped)";
+        else if (pl.raceSid != localRace) why = " (race differs: skipped)";
+        else ok = engine::chargenApply(c, pl.bod2, pl.name.c_str());
+        // Read the body's appearance back: identical bytes = it now carries the
+        // host's record (evidence for the spawn_look oracle).
+        int same = -1;
+        if (ok) {
+            std::vector<unsigned char> back;
+            same = (engine::chargenExport(c, back) && back == pl.bod2) ? 1 : 0;
+        }
+        char b[240]; _snprintf(b, sizeof(b) - 1,
+            "[spawn] LOOK apply hand=%u,%u,%u,%u,%u name='%s' race='%s' bytes=%u ok=%d same=%d%s",
+            it->first.t, it->first.c, it->first.cs, it->first.i, it->first.s,
+            pl.name.c_str(), pl.raceSid.c_str(), (unsigned)pl.bod2.size(), ok ? 1 : 0, same, why);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        pendingLooks_.erase(it);
+        return; // one apply per LOOK_GAP_MS
+    }
+}
+
 void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
     std::deque<InboundEvent> got;
     in.drainEvents(got);
@@ -846,6 +1033,18 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
         const EventPacket& ev = it->ev;
         Key k; k.t = ev.sType; k.c = ev.sContainer; k.cs = ev.sContainerSerial;
         k.i = ev.sIndex; k.s = ev.sSerial;
+        if (ev.event == EVT_FLOATER) {
+            // Damage number (protocol 68). Raised only over a copy whose hits our
+            // damage guard keeps out of the engine's wound path - where our game
+            // would otherwise show nothing. A body our own sim wounds already
+            // shows its own number. No placeholder: a cosmetic edge must not
+            // start tracking a body nobody streams to us.
+            Character* c = bodyForKey(k, 0, 0);
+            bool shown = c && engine::isDamageGuarded(c) &&
+                         engine::showDamageFloater(c, (int)ev.arg);
+            if (shown) ++floatersShown_; else ++floatersSkipped_;
+            continue;
+        }
         // N-player relay: the same reliable edge can reach us twice (a resent
         // relay, a reconnect replay); apply each (sender, eventId) once. Ids are
         // per-sender, so the window is per sender too. 0 = unnumbered.

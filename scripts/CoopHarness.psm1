@@ -112,6 +112,10 @@ $script:CoopDiagEnvKeys = @(
     # --- ragdoll re-placement (EngineEntity.cpp moveRagdollBody) -----------------
     # "0" restores the old inert corpse correction; only corpse_pos_off sets it.
     'KENSHICOOP_RAGDOLL_MOVE'
+    # --- combat run-glide (ReplicatorDrive.cpp, ReplicatorUtil.h) ---------------
+    # "0" restores the old drive of a squad copy whose owner runs mid-fight;
+    # only host_pc_retreat_off sets it.
+    'KENSHICOOP_COMBAT_RUN_GLIDE'
     # --- combat speed cap (Config.cpp) ------------------------------------------
     # The speed arbiter pins the sim to 1x while either player squad fights, which
     # is right for players and wrong for a scenario whose job is to cover 100 k u:

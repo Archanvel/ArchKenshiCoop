@@ -114,12 +114,16 @@ struct LobbyState {
     const LobbySave*   saves;
     int                saveCount;
     unsigned           joinedSerial; // bumped on entering a friend's lobby (auto-open)
+    const char*        localIp;      // this PC's LAN address ("" = unknown), shown to a host
+    const char*        lastIp;       // the address joined last time (prefills the box)
 };
 struct LobbyActions {
     void (*host)();                                   // open a Steam lobby
     void (*invite)(unsigned long long friendId);
     void (*join)(unsigned long long friendId);
     void (*leave)();                                  // leave the lobby / session
+    void (*hostDirect)();                             // host without Steam (direct IP)
+    void (*joinDirect)(const char* ip);               // join a host by IP address
     bool (*loadSave)(const char* name);               // host: load for everyone
     // Steam medium avatar as RGBA into out (false = not available yet).
     bool (*avatar)(unsigned long long id, unsigned char* out, int cap, int* w, int* h);
@@ -127,6 +131,9 @@ struct LobbyActions {
 void lobbyTick(const LobbyState* st, const LobbyActions* act);
 // True while the lobby window is open (the plugin keeps the friend list fresh).
 bool lobbyIsOpen();
+// Show the lobby window in Russian (only when the game itself runs in Russian:
+// the default fonts have no Cyrillic). Call before the first lobbyTick.
+void lobbySetRussian(bool on);
 // KENSHICOOP_TEST_LOBBY continues outside the title screen (Kenshi's New Game
 // character editor is part of the world, where the title screen no longer
 // ticks): steps like "confirm" run from here. No-op without the env script.

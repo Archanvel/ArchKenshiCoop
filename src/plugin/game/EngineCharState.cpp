@@ -850,14 +850,17 @@ typedef bool (__fastcall* PartUpdateFn)(MedicalSystem::HealthPartStatus* self,
                                         float age, float robotWear);
 static PartUpdateFn g_partUpdateOrig   = 0;
 static float        g_healMult         = 1.0f;
+static float        g_bedHealMult      = 1.0f; // extra factor while the body lies in a bed
 static bool         g_healHookInstalled = false;
 
-static bool healBoosted(MedicalSystem::HealthPartStatus* self) {
+// 0 = not a player-squad body, 1 = one, 2 = one lying in a bed.
+static int healBoosted(MedicalSystem::HealthPartStatus* self) {
     __try {
         Character* c = self ? self->me : 0;
-        return c != 0 && c->isPlayerCharacter();
+        if (c == 0 || !c->isPlayerCharacter()) return 0;
+        return c->inSomething == IN_BED ? 2 : 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+        return 0;
     }
 }
 
@@ -865,10 +868,16 @@ static bool __fastcall partUpdate_hook(MedicalSystem::HealthPartStatus* self,
                                        float frameTime, float healMultFlesh,
                                        float healMultRobot, float degenerationRate,
                                        float age, float robotWear) {
-    const float m = g_healMult;
-    if ((m > 1.001f || m < 0.999f) && healBoosted(self)) {
-        healMultFlesh *= m;
-        healMultRobot *= m;
+    const float bm = g_bedHealMult;
+    const bool anyBed = (bm > 1.001f || bm < 0.999f);
+    float m = g_healMult;
+    if (m > 1.001f || m < 0.999f || anyBed) {
+        const int hb = healBoosted(self);
+        if (hb == 2 && anyBed) m *= bm;
+        if (hb != 0 && (m > 1.001f || m < 0.999f)) {
+            healMultFlesh *= m;
+            healMultRobot *= m;
+        }
     }
     return g_partUpdateOrig(self, frameTime, healMultFlesh, healMultRobot,
                             degenerationRate, age, robotWear);
@@ -877,6 +886,11 @@ static bool __fastcall partUpdate_hook(MedicalSystem::HealthPartStatus* self,
 void setHealMult(float mult) {
     if (!(mult > 0.0f)) mult = 1.0f;
     g_healMult = mult;
+}
+
+void setBedHealMult(float mult) {
+    if (!(mult > 0.0f)) mult = 1.0f;
+    g_bedHealMult = mult;
 }
 
 bool installHealHook() {

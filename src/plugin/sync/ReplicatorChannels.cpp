@@ -645,6 +645,32 @@ void Replicator::publishMoneyPool(const SyncContext& ctx) {
         return;
     }
 
+    // Co-op balance knob (sellMult < 1): money that arrives while OUR merchant
+    // window is open is a sale; keep only the configured share of it. Done on the
+    // seller's own wallet before the pool sees the change, so both roles report
+    // the reduced amount and nothing downstream has to know.
+    if (sellMult_ < 0.999f && tradeOpen_ && cur > poolSeen_) {
+        const int gain = cur - poolSeen_;
+        const int cut  = (int)((float)gain * (1.0f - sellMult_) + 0.5f);
+        if (cut > 0 && engine::writePlayerWallet(gw, cur - cut)) {
+            char sb[128];
+            _snprintf(sb, sizeof(sb) - 1, "[wallet] SALE gain=%d kept=%d mult=%.2f",
+                      gain, gain - cut, sellMult_);
+            sb[sizeof(sb) - 1] = 0; coop::logLine(sb);
+            // Tell the seller: the trade window showed the vanilla price.
+            {
+                const int pct = (int)((1.0f - sellMult_) * 100.0f + 0.5f);
+                char en[96], ru[160];
+                _snprintf(en, sizeof(en) - 1, "Sale: %d -> %d  (co-op penalty %d%%)", gain, gain - cut, pct);
+                en[sizeof(en) - 1] = 0;
+                _snprintf(ru, sizeof(ru) - 1, "\xD0\x9F\xD1\x80\xD0\xBE\xD0\xB4\xD0\xB0\xD0\xB6\xD0\xB0" ": %d -> %d  (" "\xD0\xBA\xD0\xBE\xD0\xBE\xD0\xBF" "-" "\xD1\x88\xD1\x82\xD1\x80\xD0\xB0\xD1\x84" " %d%%)", gain, gain - cut, pct);
+                ru[sizeof(ru) - 1] = 0;
+                setUiNotice(en, ru, now, 4000);
+            }
+            cur -= cut;
+        }
+    }
+
     if (hostRole) {
         // Our engine wallet IS the pool. A local move is already authoritative;
         // just keep the mirror and let the change gate publish it.
@@ -803,6 +829,22 @@ void Replicator::applyMoneyPool(const SyncContext& ctx) {
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
 }
 
+// Protocol 69: fingerprint of a faction row's membership state (alliance flags,
+// ranks, state variables). 0 is "unread".
+static u32 facStateHash(const engine::FactionRead& r) {
+    if (!r.stateOk) return 0;
+    u32 h = 2166136261u;
+    #define FAC_MIX(v) { h ^= (u32)(v); h *= 16777619u; }
+    FAC_MIX(r.allyUs); FAC_MIX(r.allyThem); FAC_MIX(r.rankUs); FAC_MIX(r.rankThem);
+    for (unsigned int i = 0; i < r.nVars && i < 6; ++i) {
+        FAC_MIX(r.vars[i].side);
+        for (const char* p = r.vars[i].name; *p; ++p) FAC_MIX((unsigned char)*p);
+        FAC_MIX(r.vars[i].value);
+    }
+    #undef FAC_MIX
+    return h ? h : 1u;
+}
+
 void Replicator::publishFactions(const SyncContext& ctx) {
     GameWorld* gw = ctx.gw; NetLink& net = *ctx.net; u32 ownerId = ctx.localId;
     if (!factionSync_) return;
@@ -825,6 +867,7 @@ void Replicator::publishFactions(const SyncContext& ctx) {
     const unsigned int MAX_FACTIONS = 96;
     static engine::FactionRead rows[MAX_FACTIONS]; // main-thread only
     unsigned int n = engine::listPlayerRelations(gw, rows, MAX_FACTIONS);
+    unsigned int seedRows = 0, seedOk = 0, seedAlly = 0, seedVars = 0;
     for (unsigned int i = 0; i < n; ++i) {
         const engine::FactionRead& r = rows[i];
         float cur = r.usToThem; // probe: the two table directions stay mirrored
@@ -833,9 +876,14 @@ void Replicator::publishFactions(const SyncContext& ctx) {
             // Both clients load the same save, so the baseline is shared: seed
             // silently and stream only genuine mid-session movement.
             fr.seeded = true; fr.known = cur;
+            fr.stateHash = facStateHash(r);
+            ++seedRows;
+            if (r.stateOk) { ++seedOk; seedVars += r.nVars; if (r.allyUs || r.allyThem) ++seedAlly; }
             continue;
         }
-        bool changed = (cur - fr.known >= EPS) || (fr.known - cur >= EPS);
+        const u32 sh = facStateHash(r);
+        const bool stateChanged = sh != 0 && sh != fr.stateHash;
+        bool changed = (cur - fr.known >= EPS) || (fr.known - cur >= EPS) || stateChanged;
         // Seeded silently above, so a never-sent row holds (resendUnsent=false);
         // only a real move or a post-send safety resend crosses.
         if (!sync::gateShouldSend(changed, now, fr.lastSendMs, /*minSendMs*/ 0,
@@ -850,6 +898,26 @@ void Replicator::publishFactions(const SyncContext& ctx) {
         strncpy(pkt.sid, r.sid, sizeof(pkt.sid) - 1);
         pkt.sid[sizeof(pkt.sid) - 1] = '\0';
         pkt.relation = cur;
+        if (r.stateOk) {
+            fr.stateHash = sh;
+            pkt.hasState = 1;
+            pkt.allyUs = r.allyUs; pkt.allyThem = r.allyThem;
+            pkt.rankUs = r.rankUs; pkt.rankThem = r.rankThem;
+            pkt.nVars = (u8)((r.nVars > FAC_VARS_MAX) ? FAC_VARS_MAX : r.nVars);
+            for (unsigned int v = 0; v < pkt.nVars; ++v) {
+                pkt.vars[v].side = r.vars[v].side;
+                strncpy(pkt.vars[v].name, r.vars[v].name, sizeof(pkt.vars[v].name) - 1);
+                pkt.vars[v].value = r.vars[v].value;
+            }
+            if (stateChanged) {
+                char sb[176];
+                _snprintf(sb, sizeof(sb) - 1,
+                          "[fac] STATE SEND sid='%s' ally=%u/%u rank=%d/%d vars=%u",
+                          pkt.sid, (unsigned)pkt.allyUs, (unsigned)pkt.allyThem,
+                          pkt.rankUs, pkt.rankThem, (unsigned)pkt.nVars);
+                sb[sizeof(sb) - 1] = 0; coop::logLine(sb);
+            }
+        }
         net.queueFaction(pkt);
         if (changed) { // resends stay silent; the change is the signal
             char b[144];
@@ -857,6 +925,13 @@ void Replicator::publishFactions(const SyncContext& ctx) {
                       pkt.sid, cur, pkt.seq);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
+    }
+    if (seedRows > 0) {
+        // Evidence that the membership state is readable on this game build.
+        char sb[160];
+        _snprintf(sb, sizeof(sb) - 1, "[fac] STATE seed rows=%u readable=%u allied=%u vars=%u",
+                  seedRows, seedOk, seedAlly, seedVars);
+        sb[sizeof(sb) - 1] = '\0'; coop::logLine(sb);
     }
 }
 
@@ -878,6 +953,33 @@ void Replicator::applyFactions(const SyncContext& ctx) {
         // write causes must not be re-detected as ours next sample.
         fr.known = p.relation;
         fr.seeded = true;
+        // Protocol 69: the membership state rides the same row. Applied before the
+        // relation's own convergence test - the number can already match while the
+        // flags do not (which is exactly how this went unnoticed).
+        if (p.hasState) {
+            engine::FactionRead st; memset(&st, 0, sizeof(st));
+            st.stateOk = true;
+            st.allyUs = p.allyUs; st.allyThem = p.allyThem;
+            st.rankUs = p.rankUs; st.rankThem = p.rankThem;
+            st.nVars = (p.nVars > FAC_VARS_MAX) ? FAC_VARS_MAX : p.nVars;
+            for (unsigned int v = 0; v < st.nVars; ++v) {
+                st.vars[v].side = p.vars[v].side ? 1 : 0;
+                memcpy(st.vars[v].name, p.vars[v].name, sizeof(st.vars[v].name));
+                st.vars[v].name[sizeof(st.vars[v].name) - 1] = 0;
+                st.vars[v].value = p.vars[v].value;
+            }
+            const u32 want = facStateHash(st);
+            if (want != fr.stateHash) {
+                bool sok = engine::writeFactionStateBySid(gw, p.sid, st);
+                fr.stateHash = want; // echo guard: our own write is not a local change
+                char sb[176];
+                _snprintf(sb, sizeof(sb) - 1,
+                          "[fac] STATE RECV sid='%s' ally=%u/%u rank=%d/%d vars=%u ok=%d",
+                          p.sid, (unsigned)st.allyUs, (unsigned)st.allyThem,
+                          st.rankUs, st.rankThem, st.nVars, sok ? 1 : 0);
+                sb[sizeof(sb) - 1] = 0; coop::logLine(sb);
+            }
+        }
         if (us > -900.0f && (us - p.relation < EPS) && (p.relation - us < EPS))
             continue; // already converged (resend or echo)
         bool ok = engine::writeRelationBySid(gw, p.sid, p.relation,
@@ -898,9 +1000,9 @@ void Replicator::publishDoors(const SyncContext& ctx) {
     if (!sync::gateSampleDue(now, doorSampleMs_, SAMPLE_MS)) return;
     doorSampleMs_ = now;
 
-    const unsigned int MAX_DOORS = 64;
+    const unsigned int MAX_DOORS = 128;
     static engine::DoorRead rows[MAX_DOORS]; // main-thread only
-    unsigned int n = engine::enumDoorsNear(gw, 100.0f, rows, MAX_DOORS);
+    unsigned int n = engine::enumDoorsNear(gw, 250.0f, rows, MAX_DOORS);
     for (unsigned int i = 0; i < n; ++i) {
         const engine::DoorRead& r = rows[i];
         // Protocol 28 partition: doors on SESSION-PLACED buildings (ours or
@@ -916,17 +1018,43 @@ void Replicator::publishDoors(const SyncContext& ctx) {
         Key k; k.t = r.hand[0]; k.c = r.hand[1]; k.cs = r.hand[2];
         k.i = r.hand[3]; k.s = r.hand[4];
         DoorRow& dr = doorRows_[k];
-        if (!dr.seeded) {
-            // Both clients load the same save, so the baseline is shared: seed
-            // silently and stream only genuine mid-session movement.
-            dr.seeded = true; dr.knownOpen = r.open; dr.knownLocked = r.locked;
+        if (dr.want) {
+            // The peer's state for this door arrived before the door was loaded
+            // here. Apply it now; treating the difference as OUR change (as the
+            // old code did) sent our stale state back and undid the peer's click.
+            dr.want = false;
+            const bool lockMoves = r.hasLock && r.locked != dr.wantLocked;
+            bool ok = true;
+            if (r.open != dr.wantOpen || lockMoves)
+                ok = engine::writeDoorByHand(r.hand, dr.wantOpen,
+                                             r.hasLock ? dr.wantLocked : -1, 0);
+            dr.seeded = true; dr.knownOpen = dr.wantOpen;
+            dr.knownLocked = r.hasLock ? dr.wantLocked : r.locked;
+            char wb[176];
+            _snprintf(wb, sizeof(wb) - 1,
+                      "[door] LATE-APPLY hand=%u.%u.%u.%u.%u open=%d locked=%d was=%d/%d ok=%d",
+                      r.hand[0], r.hand[1], r.hand[2], r.hand[3], r.hand[4],
+                      dr.wantOpen, dr.wantLocked, r.open, r.locked, ok ? 1 : 0);
+            wb[sizeof(wb) - 1] = '\0'; coop::logLine(wb);
             continue;
         }
+        bool seedSend = false;
+        if (!dr.seeded) {
+            // The two engines do NOT share a baseline: each loads a town at its
+            // own moment and its own shopkeepers lock up for the night (Squin,
+            // 2026-11-19: the door was open for the host, closed for the join).
+            // The host's first sight of a door is the truth and goes out; a join
+            // seeds silently and waits for it.
+            dr.seeded = true; dr.knownOpen = r.open; dr.knownLocked = r.locked;
+            if (!isHostRole()) continue;
+            seedSend = true;
+        }
         bool changed = (r.open != dr.knownOpen) || (r.locked != dr.knownLocked);
-        // Doors seed their baseline silently above, so a never-sent row holds
-        // (resendUnsent = false); only a real change or a post-send safety
-        // resend crosses. No burst throttle - the 1 Hz sample gate paces it.
-        if (!sync::gateShouldSend(changed, now, dr.lastSendMs, /*minSendMs*/ 0,
+        // Only a real change or a post-send safety resend crosses (the host has
+        // sent every row once, so its resend covers all of them). No burst
+        // throttle - the 1 Hz sample gate paces it.
+        if (!seedSend &&
+            !sync::gateShouldSend(changed, now, dr.lastSendMs, /*minSendMs*/ 0,
                                   RESEND_MS, /*resendUnsent*/ false))
             continue;
         dr.knownOpen = r.open; dr.knownLocked = r.locked; dr.lastSendMs = now;
@@ -967,8 +1095,13 @@ void Replicator::applyDoors(const SyncContext& ctx) {
         dr.knownOpen = (int)p.open; dr.knownLocked = (int)p.locked;
         dr.seeded = true;
         engine::DoorRead cur;
-        if (!engine::readDoorByHand(p.hand, &cur))
-            continue; // out-of-interest or runtime door - accepted edge
+        if (!engine::readDoorByHand(p.hand, &cur)) {
+            // Not loaded here yet: keep it for the first sample that sees the door.
+            dr.want = true; dr.wantOpen = (int)p.open; dr.wantLocked = (int)p.locked;
+            dr.seeded = false;
+            continue;
+        }
+        dr.want = false;
         bool lockMoves = cur.hasLock && (cur.locked != (int)p.locked);
         if (cur.open == (int)p.open && !lockMoves)
             continue; // already converged (resend or echo)
@@ -1002,9 +1135,23 @@ void Replicator::publishProd(const SyncContext& ctx) {
     if (!sync::gateSampleDue(now, prodSampleMs_, SAMPLE_MS)) return;
     prodSampleMs_ = now;
 
-    const unsigned int MAX_MACH = 48;
+    const unsigned int MAX_MACH = 64;
     static engine::ProdRead rows[MAX_MACH]; // main-thread only
-    unsigned int n = engine::enumMachinesNear(gw, 100.0f, rows, MAX_MACH);
+    unsigned int n = engine::enumMachinesNear(gw, 100.0f, rows, MAX_MACH - 16);
+    if (isHostRole()) {
+        // Machines our copies of the peers' workers are on, wherever the
+        // cameras look: without their rows the join stops treating the machine
+        // as host-simulated and mines it a second time.
+        unsigned int dh[16][5];
+        unsigned int nd = engine::drivenWorkedMachines(dh, 16, 8000);
+        for (unsigned int d = 0; d < nd && n < MAX_MACH; ++d) {
+            bool dup = false;
+            for (unsigned int k = 0; k < n; ++k)
+                if (rows[k].hand[1] == dh[d][1] && rows[k].hand[3] == dh[d][3] &&
+                    rows[k].hand[4] == dh[d][4]) { dup = true; break; }
+            if (!dup && engine::readMachineByHand(dh[d], &rows[n])) ++n;
+        }
+    }
     for (unsigned int i = 0; i < n; ++i) {
         const engine::ProdRead& r = rows[i];
         Key lk; lk.t = r.hand[0]; lk.c = r.hand[1]; lk.cs = r.hand[2];

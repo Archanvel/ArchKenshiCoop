@@ -1462,6 +1462,9 @@ int removeItemsFromContainerBySid(GameWorld* gw, const unsigned int cHand[5],
     return removed;
 }
 
+static unsigned long g_moveLostStacks = 0; // put-backs the source refused (stack lost)
+unsigned long moveLostStacks() { return g_moveLostStacks; }
+
 int moveItemBetweenContainers(GameWorld* gw, const unsigned int srcHand[5],
                               const unsigned int dstHand[5],
                               const char* sid, unsigned int typeCat, int qty,
@@ -1498,7 +1501,10 @@ int moveItemBetweenContainers(GameWorld* gw, const unsigned int srcHand[5],
                 Item* taken = src->removeItemDontDestroy_returnsItem(curItems[i], take, false); // virtual
                 if (!taken) continue;
                 if (!dst->tryAddItem(taken, take)) {          // virtual: real-object relocation
-                    src->tryAddItem(taken, take);             // destination refused - put it back
+                    // Destination refused - put it back. A corpse can refuse the
+                    // put-back as well, and then the stack belongs to nothing:
+                    // say so (the field log's vanished hides), never stay silent.
+                    if (!src->tryAddItem(taken, take)) g_moveLostStacks++;
                     g_invVetoSuspend = vetoSav;
                     return moved;
                 }

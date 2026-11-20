@@ -19,6 +19,7 @@
 // declared in EngineInternal.h / Engine.h and defined in their owning TUs.
 
 #include "EngineInternal.h"
+#include <kenshi/gui/ScreenLabel.h>
 
 namespace coop {
 namespace engine {
@@ -219,7 +220,157 @@ Sword* __fastcall swordCtor_hook(Sword* self, GameData* baseData, GameData* comp
     return r;
 }
 
+// ---- Damage-floater trace (2026-11-18 field report: on the join the damage numbers
+// were "sometimes shown, sometimes not, sometimes an endless stream"). Kenshi draws
+// them as rising ScreenLabels; these detours log every label's caption, the stack of
+// engine callers that made it, and the hand it is pinned over, so a run shows which
+// engine path emits the join's numbers. Diagnostic only (KENSHICOOP_DEBUG_FLOATERS).
+typedef ScreenLabel* (__fastcall* LabelCtorFn)(ScreenLabel* self, const std::string& caption,
+                                               const MyGUI::Colour& col, int size, int speed);
+typedef void (__fastcall* LabelTrackFn)(ScreenLabel* self, const hand& h,
+                                        const Ogre::Vector3& offset);
+LabelCtorFn  g_labelCtorOrig  = 0;
+LabelTrackFn g_labelTrackOrig = 0;
+unsigned long g_floaterLines = 0;
+const unsigned long FLOATER_LOG_CAP = 6000;
+unsigned __int64 g_exeBase = 0; // real module base (Steam and GOG RVAs differ)
+
+// Which damage paths are on the stack when a label is made (depth counters).
+int g_inPartDmg = 0;   // MedicalSystem::HealthPartStatus::applyDamage
+int g_inMedDmg  = 0;   // MedicalSystem::applyDamage (protected)
+int g_inWound   = 0;   // MedicalSystem::addWound
+typedef void (__fastcall* PartDmgFn)(MedicalSystem::HealthPartStatus* self, const Damages& d);
+typedef void (__fastcall* MedDmgFn)(MedicalSystem* self, MedicalSystem::HealthPartStatus* part,
+                                    const Damages& d, bool loading, bool canSever,
+                                    const Ogre::Vector3& force);
+typedef GameData* (__fastcall* WoundFn)(MedicalSystem* self, bool lowBlow, CutDirection area,
+                                        Damages& d, int& material, RootObject* attacker,
+                                        AttackDirection::Enum& dir, Harpoon* harpoon);
+PartDmgFn g_partDmgOrig = 0;
+MedDmgFn  g_medDmgOrig  = 0;
+WoundFn   g_woundOrig   = 0;
+void __fastcall partDmg_hook(MedicalSystem::HealthPartStatus* self, const Damages& d) {
+    ++g_inPartDmg; g_partDmgOrig(self, d); --g_inPartDmg;
+}
+void __fastcall medDmg_hook(MedicalSystem* self, MedicalSystem::HealthPartStatus* part,
+                            const Damages& d, bool loading, bool canSever,
+                            const Ogre::Vector3& force) {
+    ++g_inMedDmg; g_medDmgOrig(self, part, d, loading, canSever, force); --g_inMedDmg;
+}
+GameData* __fastcall wound_hook(MedicalSystem* self, bool lowBlow, CutDirection area,
+                                Damages& d, int& material, RootObject* attacker,
+                                AttackDirection::Enum& dir, Harpoon* harpoon) {
+    float c0 = d.cut, b0 = d.blunt, p0 = d.pierce, s0 = d.extraStun;
+    ++g_inWound;
+    GameData* r = g_woundOrig(self, lowBlow, area, d, material, attacker, dir, harpoon);
+    --g_inWound;
+    if (g_floaterLines < FLOATER_LOG_CAP) {
+        ++g_floaterLines;
+        char b[224];
+        _snprintf(b, sizeof(b) - 1,
+                  "[floater] wound in cut=%.2f blunt=%.2f pierce=%.2f stun=%.2f out cut=%.2f "
+                  "blunt=%.2f pierce=%.2f stun=%.2f bleed=%.2f ap=%.2f low=%d",
+                  c0, b0, p0, s0, d.cut, d.blunt, d.pierce, d.extraStun, d.bleedMult,
+                  d.armourPenetration, lowBlow ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+    return r;
+}
+
+// Protected members are addressable through a derived class's qualified name.
+struct LabelAccess : ScreenLabel {
+    static intptr_t ctorAddr() { return KenshiLib::GetRealAddress(&LabelAccess::_CONSTRUCTOR); }
+};
+struct MedAccess : MedicalSystem {
+    static intptr_t dmgAddr() { return KenshiLib::GetRealAddress(&MedAccess::applyDamage); }
+};
+
+void floaterStack(char* out, unsigned int len) {
+    out[0] = '\0';
+    void* frames[8];
+    USHORT n = RtlCaptureStackBackTrace(2, 8, frames, 0);
+    unsigned int pos = 0;
+    for (USHORT i = 0; i < n && pos + 20 < len; ++i) {
+        unsigned __int64 a = (unsigned __int64)frames[i];
+        int w = _snprintf(out + pos, len - pos - 1, "%s+0x%I64X", i ? "<" : "",
+                          (g_exeBase && a > g_exeBase) ? a - g_exeBase : a);
+        if (w < 0) break;
+        pos += (unsigned int)w;
+    }
+    out[len - 1] = '\0';
+}
+
+ScreenLabel* __fastcall labelCtor_hook(ScreenLabel* self, const std::string& caption,
+                                       const MyGUI::Colour& col, int size, int speed) {
+    ScreenLabel* r = g_labelCtorOrig(self, caption, col, size, speed);
+    if (g_floaterLines < FLOATER_LOG_CAP) {
+        ++g_floaterLines;
+        __try {
+            char cap[48]; strncpy(cap, caption.c_str(), sizeof(cap) - 1); cap[sizeof(cap) - 1] = '\0';
+            char st[200]; floaterStack(st, sizeof(st));
+            char b[320];
+            _snprintf(b, sizeof(b) - 1,
+                      "[floater] label self=%p cap='%s' size=%d speed=%d col=%.2f,%.2f,%.2f,%.2f "
+                      "in=%d%d%d stack=%s",
+                      self, cap, size, speed, col.red, col.green, col.blue, col.alpha,
+                      g_inPartDmg > 0 ? 1 : 0, g_inMedDmg > 0 ? 1 : 0, g_inWound > 0 ? 1 : 0, st);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    return r;
+}
+
+void __fastcall labelTrack_hook(ScreenLabel* self, const hand& h, const Ogre::Vector3& offset) {
+    g_labelTrackOrig(self, h, offset);
+    if (g_floaterLines < FLOATER_LOG_CAP) {
+        ++g_floaterLines;
+        __try {
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "[floater] track self=%p hand=%u,%u off=%.1f,%.1f,%.1f",
+                      self, (unsigned)h.index, (unsigned)h.serial, offset.x, offset.y, offset.z);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+}
+
 } // namespace
+
+bool installFloaterTraceHook() {
+    intptr_t a6 = KenshiLib::GetRealAddress(
+        static_cast<Item* (RootObjectFactory::*)(GameData*, const hand&, GameData*,
+                                                 GameData*, int, Faction*)>(
+            &RootObjectFactory::createItem));
+    g_exeBase = (unsigned __int64)GetModuleHandleA(0);
+    // Real addresses only (the header RVAs are one build's; the installs here are
+    // Steam): a hook placed by RVA arithmetic patched the middle of another
+    // function and crashed the game at load (run 20261118_192705).
+    intptr_t aCtor  = LabelAccess::ctorAddr();
+    intptr_t aTrack = KenshiLib::GetRealAddress(&ScreenLabel::_NV_setTracking);
+    intptr_t aPart  = KenshiLib::GetRealAddress(&MedicalSystem::HealthPartStatus::applyDamage);
+    intptr_t aMed   = MedAccess::dmgAddr();
+    // addWound itself is detoured by the production damage-number hook.
+    intptr_t aWound = 0;
+    int ok = 0;
+    if (aCtor && KenshiLib::AddHook(aCtor, (void*)&labelCtor_hook,
+                                    (void**)&g_labelCtorOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aTrack && KenshiLib::AddHook(aTrack, (void*)&labelTrack_hook,
+                                     (void**)&g_labelTrackOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aPart && KenshiLib::AddHook(aPart, (void*)&partDmg_hook,
+                                    (void**)&g_partDmgOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aMed && KenshiLib::AddHook(aMed, (void*)&medDmg_hook,
+                                   (void**)&g_medDmgOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aWound && KenshiLib::AddHook(aWound, (void*)&wound_hook,
+                                     (void**)&g_woundOrig) == KenshiLib::SUCCESS) ++ok;
+    char b[256];
+    _snprintf(b, sizeof(b) - 1,
+              "[floater] trace hooks installed %d/5 base=%I64X ctor=+%I64X track=+%I64X "
+              "partDmg=+%I64X medDmg=+%I64X wound=+%I64X",
+              ok, g_exeBase, (unsigned __int64)aCtor - g_exeBase,
+              (unsigned __int64)aTrack - g_exeBase, (unsigned __int64)aPart - g_exeBase,
+              (unsigned __int64)aMed - g_exeBase, (unsigned __int64)aWound - g_exeBase);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    return ok > 0;
+}
 
 bool installCreateItemTraceHook() {
     // Base for caller RVAs: createItem6's documented RVA anchors the module base.

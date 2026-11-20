@@ -290,6 +290,75 @@ bool joinPlayerSquadAt(GameWorld* gw, Character* c, const unsigned int newHand[5
     }
 }
 
+// Protocol 69. RelationData of `rel` toward `who`. A read must not create a row
+// (the engine accessor inserts a default one), so it looks the map up first.
+typedef FactionRelations::RelationData* (*RelDataFn)(FactionRelations*, Faction*);
+static RelDataFn g_relDataFn = 0;
+static bool      g_relDataTried = false;
+static FactionRelations::RelationData* relDataOf(FactionRelations* rel, Faction* who, bool create) {
+    if (!rel || !who) return 0;
+    if (!create) {
+        if (rel->_factionRelations.find(who) == rel->_factionRelations.end()) return 0;
+    }
+    if (!g_relDataTried) {
+        g_relDataTried = true;
+        g_relDataFn = (RelDataFn)KenshiLib::GetRealAddress(&FactionRelations::_NV_getRelationData);
+    }
+    return g_relDataFn ? g_relDataFn(rel, who) : 0;
+}
+// The map walk has iterators, so it cannot share a frame with __try (C2712).
+static void collectFactionVars(FactionRelations::RelationData* rd, unsigned char side, FactionRead& r) {
+    if (!rd) return;
+    for (std::map<std::string, int, std::less<std::string>,
+                  Ogre::STLAllocator<std::pair<std::string const, int>, Ogre::GeneralAllocPolicy> >::iterator
+             it = rd->stateVariables.begin(); it != rd->stateVariables.end(); ++it) {
+        if (r.nVars >= 6) break;
+        if (it->first.empty() || it->first.size() >= sizeof(r.vars[0].name)) continue;
+        FactionRead::Var& v = r.vars[r.nVars++];
+        memset(&v, 0, sizeof(v));
+        v.side = side;
+        strncpy(v.name, it->first.c_str(), sizeof(v.name) - 1);
+        v.value = it->second;
+    }
+}
+static void readFactionStateInner(Faction* pf, Faction* f, FactionRead& r) {
+    FactionRelations::RelationData* us   = relDataOf(pf->relations, f, false);
+    FactionRelations::RelationData* them = relDataOf(f->relations, pf, false);
+    r.allyUs   = (us && us->alliance) ? 1 : 0;
+    r.allyThem = (them && them->alliance) ? 1 : 0;
+    r.rankUs   = pf->relations->playerRank;
+    r.rankThem = f->relations->playerRank;
+    r.nVars = 0;
+    collectFactionVars(us, 0, r);
+    collectFactionVars(them, 1, r);
+    r.stateOk = true;
+}
+static void readFactionState(Faction* pf, Faction* f, FactionRead& r) {
+    r.stateOk = false;
+    __try { readFactionStateInner(pf, f, r); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { r.stateOk = false; r.nVars = 0; }
+}
+static void writeFactionStateInner(Faction* pf, Faction* f, const FactionRead& st) {
+    FactionRelations::RelationData* us   = relDataOf(pf->relations, f, true);
+    FactionRelations::RelationData* them = relDataOf(f->relations, pf, true);
+    if (us)   us->alliance   = st.allyUs != 0;
+    if (them) them->alliance = st.allyThem != 0;
+    pf->relations->playerRank = st.rankUs;
+    f->relations->playerRank  = st.rankThem;
+    for (unsigned int i = 0; i < st.nVars && i < 6; ++i) {
+        FactionRelations::RelationData* rd = (st.vars[i].side == 0) ? us : them;
+        if (!rd || st.vars[i].name[0] == 0) continue;
+        rd->stateVariables[std::string(st.vars[i].name)] = st.vars[i].value;
+    }
+}
+static bool writeFactionStateGuarded(Faction* pf, Faction* f, const FactionRead* st) {
+    __try { writeFactionStateInner(pf, f, *st); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        coop::logLine("[fac] state write SEH-except");
+        return false;
+    }
+}
+
 unsigned int listPlayerRelations(GameWorld* gw, FactionRead* out, unsigned int maxOut) {
     if (!gw || !out || maxOut == 0 || !g_relGetFn) return 0;
     unsigned int n = 0;
@@ -316,6 +385,7 @@ unsigned int listPlayerRelations(GameWorld* gw, FactionRead* out, unsigned int m
             r.enemy      = g_relIsEnemyFn ? (g_relIsEnemyFn(pf->relations, f) ? 1 : 0) : -1;
             r.enemyRecip = g_relIsEnemyFn ? (g_relIsEnemyFn(f->relations, pf) ? 1 : 0) : -1;
             r.ally       = g_relIsAllyFn  ? (g_relIsAllyFn(pf->relations, f)  ? 1 : 0) : -1;
+            readFactionState(pf, f, r);
             ++n;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { return n; }
@@ -367,6 +437,23 @@ bool writeRelationBySid(GameWorld* gw, const char* sid, float value, bool recipr
         coop::logLine("[fac] write SEH-except");
         return false;
     }
+}
+
+static bool factionPairBySid(GameWorld* gw, const char* sid, Faction** pf, Faction** f) {
+    __try {
+        if (!gw->player) return false;
+        *pf = gw->player->getFaction();
+        if (!*pf || !(*pf)->relations) return false;
+        *f = factionBySidC(gw, sid);
+        return *f && (*f)->relations;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+bool writeFactionStateBySid(GameWorld* gw, const char* sid, const FactionRead& st) {
+    if (!gw || !sid) return false;
+    Faction* pf = 0; Faction* f = 0;
+    if (!factionPairBySid(gw, sid, &pf, &f)) return false;
+    return writeFactionStateGuarded(pf, f, &st);
 }
 
 bool installFactionHooks() {

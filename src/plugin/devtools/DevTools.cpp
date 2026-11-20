@@ -41,7 +41,7 @@ namespace coop {
 const char* devRegimeName(int r) {
     static const char* const kNames[DR_COUNT] = {
         "none", "own", "paused", "down", "carried", "carrier", "furn",
-        "crawl", "combat", "glide", "snap", "walk", "rest", "refused"
+        "crawl", "combat", "glide", "snap", "walk", "rest", "refused", "puppet"
     };
     if (r < 0 || r >= DR_COUNT) return "?";
     return kNames[r];

@@ -140,6 +140,8 @@ public:
     // the host relays a join's to the other joins).
     void queueNativeTaken(const NativeTakenPacket& pkt);
     void queueFaction(const FactionPacket& pkt);
+    // This PC's LAN IPv4 address ("" when it cannot be determined). Any thread.
+    static std::string localIpv4();
     void queueTime(const TimePacket& pkt);
     void queueDoor(const DoorPacket& pkt);
     // MAIN thread: queue a reliable host-authoritative machine state row

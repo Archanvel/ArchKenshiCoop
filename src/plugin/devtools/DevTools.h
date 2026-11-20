@@ -43,6 +43,7 @@ enum DevRegime {
     DR_WALK,       // walk drive (move orders)
     DR_REST,       // rest / park
     DR_REFUSED,    // cell authority refused the stream
+    DR_PUPPET,     // world-NPC puppet glide (pose placed from the stream every frame)
     DR_COUNT
 };
 const char* devRegimeName(int r);

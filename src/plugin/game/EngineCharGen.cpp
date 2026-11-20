@@ -19,6 +19,7 @@
 
 #include <kenshi/gui/CharacterEditWindow.h>
 #include <kenshi/AppearanceManager.h>
+#include <kenshi/Appearance.h>  // AppearanceBase::isCreatingBody (spawn-look gate)
 #include <kenshi/RaceData.h>
 #include <windows.h>
 #include <cstdio>
@@ -238,6 +239,28 @@ bool chargenExport(Character* c, std::vector<unsigned char>& out) {
     bool ok = exportSeh(c, path) && readFileBytes(path, out) && !out.empty();
     DeleteFileA(path);
     return ok;
+}
+
+bool chargenAppearanceIdle(Character* c) {
+    if (!c) return false;
+    __try {
+        AppearanceBase* a = c->getAppearance();
+        if (!a) return false;
+        if (a->isCreatingBody || a->updatedAppearanceData || a->updateBody) return false;
+        if (a->failedToLoad()) return false;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool chargenIsHuman(Character* c) {
+    if (!c) return false;
+    __try {
+        return c->isHuman() != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 bool chargenApply(Character* c, const std::vector<unsigned char>& bod2, const char* name) {

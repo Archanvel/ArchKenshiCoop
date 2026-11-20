@@ -32,7 +32,9 @@ Replicator::Replicator()
       interpExtrap_(0), interpSegSnap_(0),
       hardSnapSquad_(0), hardSnapNpc_(0), hardSnapMid_(0),
       walkReissueSquad_(0), physHeal_(0), getUpHeal_(0), glideFrames_(0), glideStallEnters_(0), walkReissueNpc_(0), restFlipNpc_(0), restFlipMid_(0),
-      combatSnapTotal_(0), combatSoftWalk_(0), combatSlide_(0), combatOrder_(0),
+      combatSnapTotal_(0), combatSoftWalk_(0), combatRunFrames_(0), floatersSent_(0), floatersShown_(0),
+      floatersSkipped_(0), floaterLogMs_(0), poseFidLogMs_(0), lookApplyMs_(0), censusGlideFrames_(0),
+      puppetFrames_(0), puppetTps_(0), puppetClamps_(0), puppetEnters_(0), combatPuppetFrames_(0), carrierPuppetFrames_(0), combatSlide_(0), combatOrder_(0),
       combatWrongTgt_(0), combatLogTick_(0),
       interpLogTick_(0),
       trailN_(0), trailGapNewSum_(0.0f), trailGapNewMax_(0.0f), trailGapOutSum_(0.0f),
@@ -69,7 +71,7 @@ Replicator::Replicator()
       attentionRadius_(0.0f),
       attnFlips_(0), attnWinMs_(0), attnBaseSupp_(0), attnBaseCull_(0),
       attnBaseProxy_(0), attnVetoMs_(0), attnVetoRawN_(0), attnVetoMask_(0),
-      auditRows_(false), jailProbe_(false), jailObserve_(false),
+      auditRows_(false), uiNoticeUntilMs_(0), uiRussian_(false), sellMult_(1.0f), proxyTelemetry_(false), jailProbe_(false), jailObserve_(false),
       speedLastApplied_(-1.0f), speedMyReq_(-1.0f), speedPeerReq_(-1.0f),
       speedCombatCap_(true),
       speedMyCombat_(false), speedPeerCombat_(false), speedLastSet_(-1.0f),
@@ -194,6 +196,7 @@ void Replicator::resetSession() {
     drivenChars_.clear();
     drivenSeen_.clear();       // recently-driven grace (pointers dangle after swap)
     proxyOrphanMs_.clear();
+    proxyOrphanSeenMs_.clear();
     canonicalOf_.clear();      // capture-translation reverse map (same pointers)
     rekeyLogged_.clear();      // and the change-detector for its [rekey] line
     ownSkipLogMs_.clear();     // [drive] SKIP-OWNED throttle
@@ -209,6 +212,7 @@ void Replicator::resetSession() {
     lastHand_.clear();         // publishKeyFor's pointer-keyed hand memory
     suppressed_.clear();
     midBand_.clear();          // host mid-band round-robin (rebuilt by next census)
+    midPrev_.clear();          // and its membership hysteresis
     midCursor_ = 0; midSliceMs_ = 0;
     life_.clear();             // Phase 3 lifecycle: the OLD world's journeys
     lifeSweepMs_ = 0;
@@ -303,6 +307,7 @@ void Replicator::resetSession() {
     xferBase_.clear();
     xferSeeded_.clear();
     xferPend_.clear();
+    peerDropHints_.clear();
     xferLatch_.clear();
     xferDefer_.clear();
     xferOut_.clear();
@@ -660,7 +665,7 @@ void Replicator::ingestInv(Inbound& in) {
         }
         bool fresh = invRecv_.count(k) == 0;
         InvRecv& r = invRecv_[k];
-        if (fresh) { r.bench = BENCH_UNKNOWN; r.bagShortMs = 0; } // explicit: never trust value-init here
+        if (fresh) { r.bench = BENCH_UNKNOWN; r.bagShortMs = 0; r.reapplyMs = 0; } // explicit: never trust value-init here
         r.ownerId   = it->ownerId;
         r.items     = it->items; // latest snapshot supersedes
         r.dirty     = true;

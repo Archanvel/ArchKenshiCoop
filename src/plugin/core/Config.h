@@ -341,6 +341,16 @@ struct Config {
     // owner-authoritative vitals stream carries the result to the peer, so the
     // players should set the same number.
     float         healMult;
+    // "bedHealMult" / KENSHICOOP_BED_HEAL_MULT: extra healing factor while a
+    // player-squad body lies in a bed (default 3; 1 = vanilla bed).
+    float         bedHealMult;
+    // "lang" / KENSHICOOP_LANG: language of the mod's own on-screen notices
+    // ("auto" default = follow the game's language setting; "en"; "ru").
+    std::string   uiLang;
+    // "sellMult" / KENSHICOOP_SELL_MULT: share of a merchant sale the players
+    // keep (1 = vanilla, 0.5 = half; clamped to [0.1, 1]). A co-op balance knob:
+    // two players earn twice as fast as the single player Kenshi is tuned for.
+    float         sellMult;
 
     // KENSHICOOP_TRACK_MOVE=1 (DEFAULT OFF): log-only 1 Hz position track, one
     // line per player squad tab. Gates nothing. Used to RECORD a walked route at

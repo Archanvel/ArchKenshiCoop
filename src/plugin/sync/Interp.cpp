@@ -27,7 +27,7 @@ float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 InterpConfig::InterpConfig()
     : minDelayMs(50), maxDelayMs(200), maxExtrapMs(250),
       snapDistSq(50.0f * 50.0f), staleMs(2000),
-      cadenceDelayK(2.0f), maxCadenceDelayMs(1200) {}
+      cadenceDelayK(2.0f), maxCadenceDelayMs(1200), speedMult(1.0f) {}
 
 EntityInterp::EntityInterp()
     : count_(0), head_(0), lastArrival_(0),
@@ -247,8 +247,19 @@ bool EntityInterp::sample(unsigned long nowMs, const InterpConfig& cfg, EntitySt
         if (renderTime >= s0.t && renderTime <= s1.t) {
             float dx = s1.x - s0.x, dy = s1.y - s0.y, dz = s1.z - s0.z;
             // Source teleport inside this segment: snap to the newer end instead
-            // of smearing the body across the gap.
-            if (dx * dx + dy * dy + dz * dz > cfg.snapDistSq) {
+            // of smearing the body across the gap. The threshold scales with the
+            // segment's duration: a fixed 50 u read every 2 Hz mid-band runner as
+            // a teleport (world_parity 20261118_215125: 848 of 1125 puppet
+            // teleports were such false edges). Up to 600 u/s of genuine travel
+            // is interpolated, never more than 300 u in one segment.
+            float spanMs = (float)(s1.t - s0.t);
+            const float sm = (cfg.speedMult > 1.0f) ? cfg.speedMult : 1.0f;
+            float allow = 0.6f * spanMs * sm;          // 600 u/s per 1x of game speed
+            float allowSq = allow * allow;
+            if (allowSq < cfg.snapDistSq) allowSq = cfg.snapDistSq;
+            const float cap = 300.0f * sm;
+            if (allowSq > cap * cap) allowSq = cap * cap;
+            if (dx * dx + dy * dy + dz * dz > allowSq) {
                 out->x = s1.x; out->y = s1.y; out->z = s1.z;
                 out->heading = s1.heading;
                 lastMode_ = SM_SEG_SNAP;

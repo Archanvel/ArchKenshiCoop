@@ -6,6 +6,7 @@
 // Must NOT: change any SCENARIO log string (oracle API, resources/CODE_MAP.md).
 
 #include "ScenarioSupport.h"
+#include <windows.h> // TerminateProcess (peer_crash)
 
 namespace coop {
 namespace {
@@ -1632,7 +1633,201 @@ private:
 
 } // namespace
 
+// ghost_ambush (2026-11-18 field report: "the join saw phantom NPCs appear, run
+// at him to attack, and vanish"). The JOIN spawns a HOSTILE squad right in front
+// of its leader that the host never had - what a join-only native ambush is. The
+// authority pass must hide it (census-absent ghost) and keep it hidden. Every
+// 250 ms per ghost: rendered or not, distance to the join leader, and whether it
+// is attacking a player-squad member. Join verdict: every ghost hidden within
+// HIDE_TOL_MS of the spawn, never rendered again, and never attacking a player
+// while rendered after its first hide.
+class GhostAmbushScenario : public TimedScenario {
+public:
+    // startDist 0: spawn at the leader's feet. Otherwise park the squad that far
+    // out and send it at the join leader - a native ambush running in from afar.
+    GhostAmbushScenario(const char* nm, float startDist)
+        : TimedScenario(nm, 0), startDist_(startDist), spawned_(false), spawnMs_(0),
+          lastLogMs_(0), lastOrderMs_(0), nGhost_(0) {
+        for (unsigned int i = 0; i < GHOST_N; ++i) {
+            firstHideMs_[i] = 0; reappear_[i] = 0; visAfterMs_[i] = 0;
+            attackVis_[i] = 0; lastVis_[i] = true; hidden_[i] = false; minD_[i] = 1e9f;
+            hideD_[i] = -1.0f;
+        }
+    }
+
+    virtual void onStart(const ScenarioContext&) {}
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!ctx.isHost) {
+            if (!spawned_ && ctx.elapsedMs >= SPAWN_AT_MS) {
+                spawned_ = true;
+                spawnMs_ = ctx.elapsedMs;
+                nGhost_ = engine::spawnHostileSquad(ctx.gw, GHOST_N, -100.0f, hands_);
+                Character* ld = engine::leader(ctx.gw);
+                float lx = 0, ly = 0, lz = 0;
+                if (startDist_ > 0.0f && ld && engine::readPos(ld, &lx, &ly, &lz)) {
+                    for (unsigned int i = 0; i < nGhost_; ++i) {
+                        Character* c = engine::resolveCharByHand(hands_[i][3], hands_[i][4],
+                                                                 hands_[i][0], hands_[i][1],
+                                                                 hands_[i][2]);
+                        if (c) engine::park(c, lx + startDist_ + (float)i * 3.0f, ly, lz, 0.0f);
+                    }
+                }
+                for (unsigned int i = 0; i < nGhost_; ++i) {
+                    char b[144];
+                    _snprintf(b, sizeof(b) - 1, "SCENARIO SPAWN leg=ghost hand=%u,%u,%u,%u,%u",
+                              hands_[i][0], hands_[i][1], hands_[i][2], hands_[i][3], hands_[i][4]);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+                char b[96];
+                _snprintf(b, sizeof(b) - 1, "GHOST spawned n=%u t=%lu", nGhost_, ctx.elapsedMs);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            // Far variant: keep sending the not-yet-hidden ghosts at the leader.
+            if (spawned_ && startDist_ > 0.0f && ctx.elapsedMs - lastOrderMs_ >= 3000) {
+                lastOrderMs_ = ctx.elapsedMs;
+                Character* ld = engine::leader(ctx.gw);
+                unsigned int lh[5];
+                if (ld && engine::readHand(ld, lh)) {
+                    for (unsigned int i = 0; i < nGhost_; ++i)
+                        if (!hidden_[i]) engine::orderAttackByHand(ctx.gw, hands_[i], lh);
+                }
+            }
+            if (spawned_ && ctx.elapsedMs - lastLogMs_ >= 250) {
+                unsigned long step = lastLogMs_ ? (ctx.elapsedMs - lastLogMs_) : 0;
+                lastLogMs_ = ctx.elapsedMs;
+                sample(ctx, step);
+            }
+        }
+        unsigned long dur = ctx.isHost ? HOST_DURATION_MS : JOIN_DURATION_MS;
+        if (ctx.elapsedMs < dur) return false;
+        if (ctx.isHost) { passed_ = true; return true; }
+        bool ok = nGhost_ > 0;
+        for (unsigned int i = 0; i < nGhost_; ++i) {
+            // Near: hidden fast. Far: hidden while still well away from the players.
+            bool timely = (startDist_ > 0.0f) ? (hideD_[i] >= FAR_HIDE_MIN_D)
+                                              : (firstHideMs_[i] <= HIDE_TOL_MS);
+            // attackVis counts 250 ms samples where it was visibly attacking a
+            // player: at most two (~0.5 s) before the hide lands.
+            bool gi = hidden_[i] && timely && reappear_[i] == 0 && attackVis_[i] <= 2;
+            char b[208];
+            _snprintf(b, sizeof(b) - 1,
+                      "GHOST VERDICT hand=%u,%u hidden=%d firstHideMs=%lu hideD=%.0f reappear=%u "
+                      "visAfterMs=%lu attackVis=%u minD=%.0f ok=%d",
+                      hands_[i][3], hands_[i][4], hidden_[i] ? 1 : 0, firstHideMs_[i], hideD_[i],
+                      reappear_[i], visAfterMs_[i], attackVis_[i], minD_[i], gi ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            if (!gi) ok = false;
+        }
+        passed_ = ok;
+        return true;
+    }
+
+private:
+    void sample(const ScenarioContext& ctx, unsigned long step) {
+        float lx = 0, ly = 0, lz = 0;
+        Character* ld = engine::leader(ctx.gw);
+        bool haveLd = ld && engine::readPos(ld, &lx, &ly, &lz);
+        for (unsigned int i = 0; i < nGhost_; ++i) {
+            Character* c = engine::resolveCharByHand(hands_[i][3], hands_[i][4], hands_[i][0],
+                                                     hands_[i][1], hands_[i][2]);
+            bool vis = false;
+            bool visOk = c && engine::readVisible(c, &vis);
+            float x = 0, y = 0, z = 0;
+            float d = -1.0f;
+            if (c && engine::readPos(c, &x, &y, &z) && haveLd) {
+                d = std::sqrt((x - lx) * (x - lx) + (z - lz) * (z - lz));
+                if (d < minD_[i]) minD_[i] = d;
+            }
+            engine::CombatRead cr;
+            bool fight = c && engine::readCombat(c, &cr) && (cr.inCombat || cr.modeActive);
+            bool atkPlayer = c && cr.valid && cr.hasTarget &&
+                             engine::isPlayerSquadHand(ctx.gw, cr.target);
+            unsigned long rel = ctx.elapsedMs - spawnMs_;
+            if (visOk && !vis && !hidden_[i]) {
+                hidden_[i] = true; firstHideMs_[i] = rel;
+                char b[128];
+                _snprintf(b, sizeof(b) - 1, "GHOST HIDE hand=%u,%u t=%lu d=%.0f",
+                          hands_[i][3], hands_[i][4], rel, d);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            if (visOk && !vis && hideD_[i] < 0.0f) hideD_[i] = d;
+            if (visOk && vis && atkPlayer) ++attackVis_[i];
+            if (hidden_[i] && visOk && vis) {
+                if (!lastVis_[i]) ++reappear_[i];
+                visAfterMs_[i] += step;
+            }
+            if (visOk) lastVis_[i] = vis;
+            char b[192];
+            _snprintf(b, sizeof(b) - 1,
+                      "GHOST t=%lu hand=%u,%u res=%d vis=%d d=%.0f fight=%d atkPlayer=%d",
+                      rel, hands_[i][3], hands_[i][4], c ? 1 : 0, visOk ? (vis ? 1 : 0) : -1,
+                      d, fight ? 1 : 0, atkPlayer ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+
+    static const unsigned long SPAWN_AT_MS      = 12000;
+    static const unsigned long JOIN_DURATION_MS = 60000;
+    static const unsigned long HOST_DURATION_MS = 70000;
+    static const unsigned long HIDE_TOL_MS      = 1500;
+    static const unsigned int  GHOST_N          = 3;
+    static const int           FAR_HIDE_MIN_D   = 500;
+
+    float         startDist_;
+    bool          spawned_;
+    unsigned long spawnMs_;
+    unsigned long lastLogMs_;
+    unsigned long lastOrderMs_;
+    unsigned int  nGhost_;
+    unsigned int  hands_[GHOST_N][5];
+    unsigned long firstHideMs_[GHOST_N];
+    unsigned int  reappear_[GHOST_N];
+    unsigned long visAfterMs_[GHOST_N];
+    unsigned int  attackVis_[GHOST_N];
+    bool          lastVis_[GHOST_N];
+    bool          hidden_[GHOST_N];
+    float         minD_[GHOST_N];
+    float         hideD_[GHOST_N];
+};
+
+// peer_crash (2026-11-18): twice the HOST faulted (kenshi+0xf43c13, READ 0x50)
+// 11-21 s after the JOIN's game crashed. Does a peer vanishing without a
+// goodbye take the host down? The join hard-kills its own process at
+// KILL_AT_MS (TerminateProcess - no disconnect, no cleanup, like a crash); the
+// host keeps playing for HOST_DURATION_MS and passes if it is still alive.
+class PeerCrashScenario : public TimedScenario {
+public:
+    PeerCrashScenario() : TimedScenario("peer_crash", 0), lastLogMs_(0) {}
+    virtual void onStart(const ScenarioContext&) {}
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!ctx.isHost) {
+            if (ctx.elapsedMs >= KILL_AT_MS) {
+                coop::logLine("SCENARIO PEERCRASH join terminating now");
+                TerminateProcess(GetCurrentProcess(), 3);
+            }
+            return false;
+        }
+        if (ctx.elapsedMs - lastLogMs_ >= 5000) {
+            lastLogMs_ = ctx.elapsedMs;
+            char b[96]; _snprintf(b, sizeof(b) - 1, "SCENARIO PEERCRASH host alive t=%lu",
+                                  ctx.elapsedMs);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        if (ctx.elapsedMs >= HOST_DURATION_MS) { passed_ = true; return true; }
+        return false;
+    }
+private:
+    static const unsigned long KILL_AT_MS       = 20000;
+    static const unsigned long HOST_DURATION_MS = 80000;
+    unsigned long lastLogMs_;
+};
+
 Scenario* makeNpcScenario(const std::string& name) {
+    if (name == "peer_crash") return new PeerCrashScenario();
+    if (name == "ghost_ambush")     return new GhostAmbushScenario("ghost_ambush", 0.0f);
+    if (name == "ghost_ambush_split") return new GhostAmbushScenario("ghost_ambush_split", 0.0f);
+    if (name == "ghost_ambush_far") return new GhostAmbushScenario("ghost_ambush_far", 1500.0f);
     if (name == "npc_sync")     return new NpcSyncScenario();
     if (name == "craft_order")  return new CraftOrderScenario();
     if (name == "mine_pose")    return new MinePoseScenario();

@@ -11,6 +11,10 @@
 // The include prelude (Boost guards first) rides EngineInternal.h.
 
 #include "EngineInternal.h"
+#include <kenshi/MedicalSystem.h>      // MedicalSystem::addWound / me (damage-number sharing)
+#include <kenshi/gui/ScreenLabel.h>    // ScreenLabel::setTracking
+#include <kenshi/OptionsHolder.h>      // OptionsHolder::damageFloaters
+#include <mygui/MyGUI_Colour.h>
 
 namespace coop {
 namespace engine {
@@ -822,14 +826,24 @@ void __fastcall refreshInv_hook(ActivePlatoon* self, bool firstTime) {
     // The engine polls refreshInventory(false) EVERY FRAME for the shop a player
     // stands in (14,101 lines in 3 minutes, session 2026-11-18). Log the first
     // of a run, then at most one per 5 s per (leader, verdict).
-    static unsigned int s_lastC = 0, s_lastS = 0;
-    static int          s_lastSkip = -1;
-    static DWORD        s_lastMs = 0;
+    // A town polls SEVERAL shops in turn, which defeated the single-slot throttle
+    // this used to be (112,862 of 162,001 join log lines, session 2026-11-19 (4)):
+    // one slot per (leader, verdict), 30 s apart.
+    struct RefLog { unsigned int c, s; int skip; DWORD ms; };
+    static RefLog s_ref[32];
+    static unsigned int s_refN = 0, s_refNext = 0;
     const DWORD nowT = GetTickCount();
-    const bool repeat = !firstTime && lh[1] == s_lastC && lh[2] == s_lastS &&
-                        (skip ? 1 : 0) == s_lastSkip && (nowT - s_lastMs) < 5000;
+    RefLog* slot = 0;
+    for (unsigned int ri = 0; ri < s_refN; ++ri)
+        if (s_ref[ri].c == lh[1] && s_ref[ri].s == lh[2] &&
+            s_ref[ri].skip == (skip ? 1 : 0)) { slot = &s_ref[ri]; break; }
+    const bool repeat = !firstTime && slot != 0 && (nowT - slot->ms) < 30000;
     if (isTrader == 1 && !repeat) {
-        s_lastC = lh[1]; s_lastS = lh[2]; s_lastSkip = skip ? 1 : 0; s_lastMs = nowT;
+        if (!slot) {
+            if (s_refN < 32) slot = &s_ref[s_refN++];
+            else { slot = &s_ref[s_refNext]; s_refNext = (s_refNext + 1) % 32; }
+        }
+        slot->c = lh[1]; slot->s = lh[2]; slot->skip = skip ? 1 : 0; slot->ms = nowT;
         char b[176];
         _snprintf(b, sizeof(b) - 1,
                   "[vendor] %s first=%d leader=%u,%u,%u,%u,%u",
@@ -1428,6 +1442,13 @@ MachOperateFn g_opOrigCraft    = 0;
 bool g_opMirror = false;                               // join + prodSync
 std::map<Building*, unsigned long> g_opMirrored;       // machine -> mirrored-until (tick ms)
 std::map<Building*, unsigned long> g_opMirrorLogMs;    // per-machine skip log throttle
+// Host: machines a DRIVEN body (our copy of a peer's worker) worked recently.
+// The protocol-33 rows are sampled around the interest anchors (the players'
+// cameras), so a mine whose owner looked away dropped out of them while our copy
+// kept mining it: the join's mirror mark lapsed, it resumed local work, and the
+// one worker produced on both clients (2026-11-19, mine 0.2002..256: 5 ore in
+// 5 s). publishProd adds these machines to its sample whatever the cameras do.
+std::map<Building*, unsigned long> g_opDrivenWork;     // machine -> last driven work (tick ms)
 
 struct OpAgg {
     unsigned long calls, skipped, sinceMs;
@@ -1507,6 +1528,10 @@ void operateCommon(MachOperateFn orig, int gateClass, Building* self, Character*
         }
     }
     if (!skip) orig(self, who, amount);
+    if (!g_opMirror && driven) {
+        g_opDrivenWork[self] = now;
+        if (g_opDrivenWork.size() > 256) g_opDrivenWork.clear();
+    }
     float after = skip ? before : opOutAmount(self);
     // A whole unit left the buffer (amount wrapped down) or a whole stack was
     // added (the floor rose): either way one unit of output was minted here.
@@ -2449,6 +2474,76 @@ void addAiSuspend(Character* c) { if (c) g_aiSuspended.insert(c); }
 unsigned int aiSuspendCount()   { return (unsigned int)g_aiSuspended.size(); }
 bool isAiSuspended(Character* c) { return c && g_aiSuspended.find(c) != g_aiSuspended.end(); }
 
+// ---- Damage-number sharing (protocol 68, 2026-11-18 field report: on the join
+// the numbers were "sometimes shown, sometimes not"). Kenshi raises the number
+// inside MedicalSystem::addWound - ForgottenGUI::createScreenLabel(text, grey,
+// size 1, rising 1) tracked 15 u over the victim - so only the client whose sim
+// actually wounds a body ever shows one, and the damage guard keeps every hit on
+// a driven copy out of addWound. The detour queues (victim, number) for every
+// wound this client applies; the replicator ships them, and the peer raises the
+// same label over its copy (showDamageFloater). The number is the game's own:
+// (int)(cut + blunt + pierce) of the post-armour damage addWound leaves behind.
+typedef GameData* (__fastcall* AddWoundFn)(MedicalSystem* self, bool lowBlow, CutDirection area,
+                                           Damages& d, int& material, RootObject* attacker,
+                                           AttackDirection::Enum& dir, Harpoon* harpoon);
+AddWoundFn g_addWoundOrig = 0;
+std::vector<std::pair<Character*, int> > g_floaterQueue; // main thread only
+bool g_floaterDebug = false;
+
+GameData* __fastcall addWound_hook(MedicalSystem* self, bool lowBlow, CutDirection area,
+                                   Damages& d, int& material, RootObject* attacker,
+                                   AttackDirection::Enum& dir, Harpoon* harpoon) {
+    GameData* r = g_addWoundOrig(self, lowBlow, area, d, material, attacker, dir, harpoon);
+    __try {
+        Character* victim = self ? self->me : 0;
+        int value = (int)(d.cut + d.blunt + d.pierce);
+        if (victim && value > 0 && g_floaterQueue.size() < 256)
+            g_floaterQueue.push_back(std::make_pair(victim, value));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return r;
+}
+
+bool installFloaterShareHook() {
+    g_floaterDebug = getenv("KENSHICOOP_DEBUG_FLOATERS") != 0;
+    intptr_t addr = KenshiLib::GetRealAddress(&MedicalSystem::addWound);
+    if (!addr) return false;
+    return KenshiLib::AddHook(addr, (void*)&addWound_hook, (void**)&g_addWoundOrig) ==
+           KenshiLib::SUCCESS;
+}
+
+unsigned int drainDamageFloaters(Character** who, int* value, unsigned int max) {
+    unsigned int n = 0;
+    for (; n < g_floaterQueue.size() && n < max; ++n) {
+        who[n] = g_floaterQueue[n].first;
+        value[n] = g_floaterQueue[n].second;
+    }
+    g_floaterQueue.clear();
+    return n;
+}
+
+namespace {
+bool showFloaterSeh(Character* c, const std::string& text) {
+    __try {
+        if (!gui || !c) return false;
+        if (options && options->damageFloaters == 0) return false; // the player's option
+        MyGUI::Colour col(0.9f, 0.9f, 0.9f, 0.9f);
+        ScreenLabel* l = gui->createScreenLabel(text, col, (ScreenLabel::LabelSize)1,
+                                                (ScreenLabel::RisingSpeed)1);
+        if (!l) return false;
+        l->setTracking(c->handle, Ogre::Vector3(0.0f, 15.0f, 0.0f));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+} // namespace
+
+bool showDamageFloater(Character* c, int value) {
+    if (!c || value <= 0) return false;
+    char t[16]; _snprintf(t, sizeof(t) - 1, "%d", value); t[sizeof(t) - 1] = '\0';
+    return showFloaterSeh(c, std::string(t));
+}
+
 bool installDamageGuardHook() {
     intptr_t addr = KenshiLib::GetRealAddress(&Character::_NV_hitByMeleeAttack);
     if (!addr) return false;
@@ -2473,6 +2568,19 @@ int installMachineOperateHooks() {
 }
 
 void setMachineWorkMirror(bool on) { g_opMirror = on; if (!on) g_opMirrored.clear(); }
+
+unsigned int drivenWorkedMachines(unsigned int (*out)[5], unsigned int maxOut,
+                                  unsigned long ttlMs) {
+    unsigned int n = 0;
+    const unsigned long now = GetTickCount();
+    for (std::map<Building*, unsigned long>::iterator it = g_opDrivenWork.begin();
+         it != g_opDrivenWork.end(); ) {
+        if (now - it->second > ttlMs) { g_opDrivenWork.erase(it++); continue; }
+        if (n < maxOut && readObjectHand(static_cast<RootObject*>(it->first), out[n])) ++n;
+        ++it;
+    }
+    return n;
+}
 
 void markMachineMirrored(const unsigned int hand[5], unsigned long ttlMs) {
     RootObject* ro = resolveObjectByHand(hand);
@@ -2740,6 +2848,7 @@ int probeMoveSquadMember(GameWorld* gw, const unsigned int mHand[5],
 
 void clearDamageGuard()           { g_damageGuarded.clear(); }
 void addDamageGuard(Character* c) { if (c) g_damageGuarded.insert(c); }
+bool isDamageGuarded(Character* c) { return c && g_damageGuarded.find(c) != g_damageGuarded.end(); }
 unsigned int damageGuardCount()   { return (unsigned int)g_damageGuarded.size(); }
 void damageGuardStats(unsigned long* outGuarded, unsigned long* outPassed) {
     if (outGuarded) *outGuarded = g_dmgGuardedHits;

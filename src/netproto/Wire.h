@@ -25,7 +25,7 @@ typedef double         f64;
 // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
-const u16 PROTOCOL_VERSION = 67; // 67: MedicalPacket.koTimer
+const u16 PROTOCOL_VERSION = 70; // 69: FactionPacket membership state (alliance, rank, variables); 68: EVT_FLOATER damage numbers; 67: MedicalPacket.koTimer
 
 // Session size: the host (player id 0) plus up to MAX_PLAYERS-1 joins (ids
 // 1..MAX_PLAYERS-1). Star topology: joins talk only to the host, which relays
@@ -139,7 +139,13 @@ enum EventType {
     // index/serial do not survive). An all-zero actor = the body LEFT the
     // roster (dismissal). The receiver shares the EVT_RECRUIT re-key path
     // and pins the new hand as peer-owned (rank reshuffle cannot flip it).
-    EVT_SQUAD_MOVE = 11
+    EVT_SQUAD_MOVE = 11,
+    // Damage number (protocol 68). subject = the WOUNDED body (sender's wire key),
+    // arg = the number the sender's game showed over it. The receiver raises the
+    // same label over its copy: the game only shows a number where its own sim
+    // applied the wound, and every hit on a driven copy is guarded out of that
+    // path. Cosmetic, unnumbered (eventId 0), never latched.
+    EVT_FLOATER = 12
 };
 
 // Sentinel ownerId meaning "all remote peers" (a join's lost host connection
@@ -934,6 +940,7 @@ enum TradeOp {
 };
 const u8  TRADE_FLAG_STOCK     = 0x01; // the InvItemEntry tail + money are valid
 const u8  TRADE_FLAG_TRUNCATED = 0x02; // the table did not fit TRADE_LINES_MAX
+const u8  TRADE_FLAG_FULL      = 0x04; // host -> join: the tail is the WHOLE stock, not just touched lines
 const u32 TRADE_NOBODY         = 0xFFFFFFFFu;
 const unsigned int TRADE_LINES_MAX = 255; // TradeHeader::count is a u8
 struct TradeHeader {
@@ -1223,12 +1230,28 @@ struct MoneyDeltaPacket {
 // receiver updates its baseline BEFORE writing, so an applied row is never
 // re-detected as a local change (echo-free). seq is per-sender monotonic so
 // a stale row never overwrites a newer one on either side.
+const unsigned int FAC_VARS_MAX = 6;
 struct FactionPacket {
     u8  type;      // = PKT_FACTION
     u32 ownerId;   // network player id of the sender
     u32 seq;       // per-sender monotonic (stale-row guard)
     char sid[48];  // faction GameData stringID ("" never sent)
     f32 relation;  // the row value (engine range approx. -100..100)
+    // Protocol 69: what a dialogue checks besides the number. Joining a faction
+    // (pay the fee, "you are one of us now") sets an alliance flag, a rank or a
+    // faction variable; with only the number crossing, the other player saw 100
+    // and was still asked to pay (2026-11-19 session, Shinobi Thieves).
+    u8  hasState;   // 1 = the fields below are filled
+    u8  allyUs;     // player row toward the faction: RelationData::alliance
+    u8  allyThem;   // the faction row toward the player
+    i32 rankUs;     // player FactionRelations::playerRank
+    i32 rankThem;   // the faction FactionRelations::playerRank
+    u8  nVars;      // entries used in vars
+    struct Var {
+        u8   side;      // 0 = player row toward the faction, 1 = the faction row
+        char name[31];  // RelationData::stateVariables key
+        i32  value;
+    } vars[FAC_VARS_MAX];
 };
 
 // ---- Protocol 25: host-authoritative game clock -------------------------------

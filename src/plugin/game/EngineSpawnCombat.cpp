@@ -1391,6 +1391,23 @@ static bool readBoneWorld(Character* c, const std::string* boneName, Ogre::Vecto
     }
 }
 
+// The RENDERED facing, from the skeleton: the shoulder line (R - L upper arm)
+// turned 90 deg about up. Character::getOrientation is the logical rotation the
+// engine refreshes in the decision update an AI-suspended copy never runs, so it
+// can sit at a stale value (or identity) while the mesh faces elsewhere.
+// Yaw in the streamed-heading convention (atan2(x, z) of the facing vector).
+bool readRenderYaw(Character* c, float* yaw) {
+    if (!c || !yaw || !g_getBoneWorldFn) return false;
+    static const std::string lua("Bip01 L UpperArm");
+    static const std::string rua("Bip01 R UpperArm");
+    Ogre::Vector3 l(0, 0, 0), r(0, 0, 0);
+    if (!readBoneWorld(c, &lua, &l) || !readBoneWorld(c, &rua, &r)) return false;
+    float vx = r.x - l.x, vz = r.z - l.z;
+    if (vx * vx + vz * vz < 1e-4f) return false;
+    *yaw = (float)atan2(vz, -vx); // facing = up x (R - L) = (vz, 0, -vx)
+    return true;
+}
+
 bool readMeshProbe(Character* c, MeshProbe* out) {
     if (!c || !out || !g_getBoneWorldFn) return false;
     out->valid = false;
@@ -2013,6 +2030,23 @@ bool writeMedical(Character* c, const MedicalRead& in) {
     }
 }
 
+float worstLegFrac(Character* c) {
+    if (!c) return 1.0f;
+    __try {
+        MedicalSystem* med = &c->medical;
+        MedicalSystem::HealthPartStatus* legs[2] = { med->leftLeg, med->rightLeg };
+        float worst = 1.0f;
+        for (int i = 0; i < 2; ++i) {
+            if (!legs[i] || !(legs[i]->_maxHealth > 0.0f)) continue;
+            float f = legs[i]->flesh / legs[i]->_maxHealth;
+            if (f < worst) worst = f;
+        }
+        return worst;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 1.0f;
+    }
+}
+
 bool writeHungerByHand(const unsigned int hand[5], float hunger, float fed) {
     if (!hand) return false;
     Character* c = resolveCharByHand(hand[3], hand[4], hand[0], hand[1], hand[2]);
@@ -2334,6 +2368,34 @@ bool reviveSubject(GameWorld* gw, const unsigned int subjHand[5]) {
         MedicalSystem* med = &s->medical;
         med->unconcious = false;
         if (med->blood < 80.0f) med->blood = 80.0f; // healthy floor (raise only)
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool forceCopyConscious(Character* c) {
+    if (!c) return false;
+    if (g_isDeadCharFn && g_isDeadCharFn(c)) return false; // a corpse stays a corpse
+    knockDown(c, false); // release the forced KO / ragdoll (own SEH)
+    __try {
+        MedicalSystem* med = &c->medical;
+        med->unconcious = false;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool makeCopyDead(Character* c) {
+    if (!c) return false;
+    if (g_isDeadCharFn && g_isDeadCharFn(c)) return false; // already dead here
+    knockDown(c, true); // collapse first (own SEH)
+    __try {
+        MedicalSystem* med = &c->medical;
+        med->blood      = 0.0f;
+        med->unconcious = true;
+        med->dead       = true; // Character::isDead() reads this -> BODY_DEAD
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;

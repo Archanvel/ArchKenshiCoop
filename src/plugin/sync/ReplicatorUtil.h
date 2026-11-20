@@ -196,6 +196,94 @@ const unsigned long COMBAT_CONVERGE_MS = 400; // drift must persist over the sna
 // was fighting the right body (localFight=1); the walk flipped its task to
 // MOVE_ON_FREE_WILL and dropped the attack until the next re-issue.
 const unsigned long COMBAT_LOCK_HOLD_MS = 1500;
+// Combat run-glide (ReplicatorDrive): a squad copy whose owner streams a combat
+// task while RUNNING away from its target (currentSpeed >= COMBAT_RUN_SPEED for
+// COMBAT_RUN_ENTER_MS) is pose-mirrored like the glide drive instead of fought;
+// it returns to the fight COMBAT_RUN_EXIT_MS after the owner stops running.
+// KENSHICOOP_COMBAT_RUN_GLIDE=0 disables (A/B).
+const float         COMBAT_RUN_SPEED     = 35.0f;
+const unsigned long COMBAT_RUN_ENTER_MS  = 300;
+const unsigned long COMBAT_RUN_EXIT_MS   = 400;
+// Seated-NPC hold (ReplicatorDrive): keep a mid-tier seated copy on the drive,
+// re-seat a copy whose seat pose lapsed, re-seat after a stream gap.
+// KENSHICOOP_SEAT_HOLD=0 disables (A/B).
+inline bool seatHoldEnabled() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = getenv("KENSHICOOP_SEAT_HOLD");
+        s = (e && e[0] == '0') ? 0 : 1;
+    }
+    return s == 1;
+}
+// NPC puppet glide (ReplicatorDrive): 0 = off (walk orders + snap bands),
+// 1 = near-tier moving world NPCs, 2 = near + mid tier (default).
+// KENSHICOOP_NPC_PUPPET overrides.
+inline int npcPuppetMode() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = getenv("KENSHICOOP_NPC_PUPPET");
+        s = (e && e[0] >= '0' && e[0] <= '2') ? (e[0] - '0') : 2;
+    }
+    return s;
+}
+// Visual-pose turn (teleportVisuallyOnly): 0 off, 1 standing turns, 2 standing +
+// puppet frames. KENSHICOOP_VISUAL_POSE overrides (default 2).
+inline int visualPoseMode() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = getenv("KENSHICOOP_VISUAL_POSE");
+        s = (e && e[0] >= '0' && e[0] <= '2') ? (e[0] - '0') : 2;
+    }
+    return s;
+}
+// Combat puppet: world-NPC combatants placed at the host pose every frame with
+// their AI still running. KENSHICOOP_NPC_PUPPET_COMBAT=0 disables (default on).
+inline bool combatPuppetEnabled() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = getenv("KENSHICOOP_NPC_PUPPET_COMBAT");
+        s = (e && e[0] == '0') ? 0 : 1;
+    }
+    return s == 1 && npcPuppetMode() > 0;
+}
+// Carrier puppet: NPC carriers placed at the host pose every frame.
+// KENSHICOOP_CARRIER_PUPPET=0 disables (default on with the puppet drive).
+inline bool carrierPuppetEnabled() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = getenv("KENSHICOOP_CARRIER_PUPPET");
+        s = (e && e[0] == '0') ? 0 : 1;
+    }
+    return s == 1 && npcPuppetMode() > 0;
+}
+// Owner-reported deaths make the copy engine-dead (KENSHICOOP_KILL_COPIES=0: the
+// old hold-down-with-a-KO-timer).
+inline bool killCopiesEnabled() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = getenv("KENSHICOOP_KILL_COPIES");
+        s = (e && e[0] == '0') ? 0 : 1;
+    }
+    return s == 1;
+}
+// Soft rest hold: ease a standing copy back instead of teleporting it on every
+// 1 u drift. KENSHICOOP_SOFT_REST=0 restores the hard re-place (A/B).
+inline bool softRestEnabled() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = getenv("KENSHICOOP_SOFT_REST");
+        s = (e && e[0] == '0') ? 0 : 1;
+    }
+    return s == 1;
+}
+inline bool combatRunGlideEnabled() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = getenv("KENSHICOOP_COMBAT_RUN_GLIDE");
+        s = (e && e[0] == '0') ? 0 : 1;
+    }
+    return s == 1;
+}
 const unsigned long COMBAT_REISSUE_MS     = 1500; // base re-issue throttle
 const float         COMBAT_TGT_FAR_DIST   = 1000.0f; // target copy this far from the owner = diverged
 const unsigned long COMBAT_REARM_COOL_MS  = 3000; // re-arm this soon after a disarm = same episode

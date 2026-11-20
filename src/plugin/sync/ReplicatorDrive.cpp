@@ -95,6 +95,7 @@ Character* Replicator::bodyForKey(const Key& k, bool* viaProxy, bool* staleProxy
 void Replicator::applyTargets(GameWorld* gw) {
     (void)gw;
     unsigned long now = nowMs();
+    cfg_.speedMult = simMult(); // interp teleport test + puppet limits follow game speed
     // Rebuild the AI-suspend set from scratch each tick: only NPCs we drive this
     // tick stay suspended; anything we stop driving (stale/suppressed) is dropped
     // here so its AI resumes. Safe to rebuild now - the periodicUpdate detour only
@@ -189,6 +190,13 @@ void Replicator::applyTargets(GameWorld* gw) {
             // After the hold (or with the knob at 0) everything releases as
             // before; targets_ prunes at 30 s regardless.
             d.haveActual = false; d.parked = false; d.fresh = false;
+            // A seated pose is not assumed to survive the gap: the copy's AI runs
+            // while the stream is stale and may stand it up, and a resumed stream
+            // with the same task would otherwise never re-seat it.
+            if (seatHoldEnabled() && d.taskApplied &&
+                engine::taskIsSeatPose((int)d.issuedTask)) {
+                d.taskApplied = false; d.issuedTask = TASK_NONE; d.taskRetries = 0;
+            }
             if (starveHoldMs_ > 0 && d.lastSeenMs != 0 &&
                 (now - d.lastSeenMs) <= cfg_.staleMs + starveHoldMs_ &&
                 d.interp.latest(&out, 0, 0, 0)) {
@@ -365,6 +373,10 @@ void Replicator::applyTargets(GameWorld* gw) {
             continue;
         }
         drivenChars_.insert(c);
+        // Pose-fidelity sample (KENSHICOOP_POSE_FID): the pose this tick's stream
+        // says the copy should show; poseFidelityPass compares the rendered pose.
+        d.fidC = c; d.fidMs = now;
+        d.fidX = out.x; d.fidY = out.y; d.fidZ = out.z; d.fidH = out.heading;
         // The branch that drove this body LAST tick is still in dbgRegime here;
         // name it when it changes. The 5 s audit dumps cannot say why a copy
         // stood 18-29 u off a host body that never moved (world_parity
@@ -691,6 +703,7 @@ void Replicator::applyTargets(GameWorld* gw) {
             bool haveFr = engine::readFurniture(c, &lfr);
             int localKind = (haveFr && lfr.valid) ? lfr.kind : 0;
             if (localKind == 3 && !chainSync_) localKind = 0;
+            if (localKind == streamKind) { d.furnHealMiss = 0; d.furnExitMiss = 0; } // agrees: heals held
             // Jail put-to-work desync spike (KENSHICOOP_JAIL_PROBE, read-only):
             // the DRIVEN view of a peer-owned captive (the host's copy of the
             // join's jailed PC). streamKind is what the owner reports;
@@ -846,9 +859,18 @@ void Replicator::applyTargets(GameWorld* gw) {
                         pm.koTimer >= 0.0f && pm.koTimer < 3.0f)
                         engine::holdDown(c, 8.0f);
                 }
+                // Back off a heal that does not stick (2026-11-19 field log: one
+                // bedded NPC re-entered every 1.5 s for minutes, 58 times, each a
+                // visible jerk): FURN_HEAL_MS doubling per consecutive miss, 30 s cap.
+                if (haveFr && localKind == streamKind) d.furnHealMiss = 0;
+                unsigned long furnGap = FURN_HEAL_MS;
+                for (unsigned int bi = 0; bi < d.furnHealMiss && furnGap < 30000; ++bi)
+                    furnGap *= 2;
+                if (furnGap > 30000) furnGap = 30000;
                 if (haveFr && localKind != streamKind &&
-                    (now - d.furnHealTick) >= FURN_HEAL_MS) {
+                    (now - d.furnHealTick) >= furnGap) {
                     d.furnHealTick = now;
+                    if (d.furnHealMiss < 16) ++d.furnHealMiss;
                     // Chain (kind 3) has no searchable building and needs the
                     // OWNER: re-apply setChainedMode with the remembered owner,
                     // or - for a prisoner that spawned into interest already
@@ -911,15 +933,41 @@ void Replicator::applyTargets(GameWorld* gw) {
                 // drop the in-progress sleep action, release the held pose, and
                 // FALL THROUGH (no continue) so the unified drive follows the
                 // host this same tick.
-                bool ok = engine::applyFurniture(gw, c, lfr.furn, 1, false);
-                engine::endAction(c);
-                d.furnNoSeeTick = 0;
-                d.furnHandKind = 0;
-                d.taskApplied = false; d.issuedTask = TASK_NONE; d.taskNoneTick = 0;
-                char bfe[160]; _snprintf(bfe, sizeof(bfe) - 1,
-                    "[furn] BED FAST-EXIT occ=%u,%u ok=%d hostMoving=1",
-                    out.hIndex, out.hSerial, ok ? 1 : 0);
-                bfe[sizeof(bfe) - 1] = '\0'; coop::logLine(bfe);
+                // Storm guard (2026-11-19 field log, join): bodies the join
+                // posed into bed at session start (USE_BED applyOrder) re-entered
+                // it right after every exit - setBedMode(false) "succeeded"
+                // (ok=1) but the queued USE_BED goal walked the body straight
+                // back in, so the exit fired at the drive rate for a minute
+                // (2919 lines, 150-260 per body) and the body, pinned in bed
+                // while its owner walked away, finally teleported 780-1160 u.
+                // A repeat attempt now also drops the body's queued goals, and
+                // attempts back off (400 ms doubling, 8 s cap) so a bed that
+                // will not release cannot jerk the body every tick.
+                unsigned long bedGap = 0;
+                if (d.bedExitTry > 0) {
+                    bedGap = 400;
+                    for (unsigned int bi = 1; bi < d.bedExitTry && bedGap < 8000; ++bi) bedGap *= 2;
+                    if (bedGap > 8000) bedGap = 8000;
+                }
+                if (d.bedExitTry == 0 || (now - d.bedExitMs) >= bedGap) {
+                    d.bedExitMs = now;
+                    if (d.bedExitTry > 0) engine::clearGoals(c);
+                    bool ok = engine::applyFurniture(gw, c, lfr.furn, 1, false);
+                    engine::endAction(c);
+                    if (d.bedExitTry < 16) ++d.bedExitTry;
+                    d.furnNoSeeTick = 0;
+                    d.furnHandKind = 0;
+                    d.taskApplied = false; d.issuedTask = TASK_NONE; d.taskNoneTick = 0;
+                    unsigned int t = d.bedExitTry;
+                    if (t <= 2 || (t & (t - 1)) == 0) {
+                        engine::FurnitureRead after;
+                        int afterKind = (engine::readFurniture(c, &after) && after.valid) ? after.kind : -1;
+                        char bfe[176]; _snprintf(bfe, sizeof(bfe) - 1,
+                            "[furn] BED FAST-EXIT occ=%u,%u ok=%d try=%u after=%d hostMoving=1",
+                            out.hIndex, out.hSerial, ok ? 1 : 0, t, afterKind);
+                        bfe[sizeof(bfe) - 1] = '\0'; coop::logLine(bfe);
+                    }
+                }
             } else if (localKind != 0) {
                 // Third-party placement authority (protocol 36): a HOST-sim
                 // actor (a guard jailing an arrested player) put this PEER-
@@ -980,10 +1028,15 @@ void Replicator::applyTargets(GameWorld* gw) {
                     d.dbgRegime = DR_FURN;
                     continue;
                 }
+                unsigned long exitGap = FURN_EXIT_MS;
+                for (unsigned int bi = 0; bi < d.furnExitMiss && exitGap < 30000; ++bi)
+                    exitGap *= 2;
+                if (exitGap > 30000) exitGap = 30000;
                 if (d.furnNoSeeTick == 0) {
                     d.furnNoSeeTick = now;
-                } else if ((now - d.furnNoSeeTick) > FURN_EXIT_MS) {
+                } else if ((now - d.furnNoSeeTick) > exitGap) {
                     d.furnNoSeeTick = 0;
+                    if (d.furnExitMiss < 16) ++d.furnExitMiss; // reset when the exit holds
                     bool ok = engine::applyFurniture(gw, c, lfr.furn, localKind, false);
                     char b[160]; _snprintf(b, sizeof(b) - 1,
                         "[furn] HEAL EXIT occ=%u,%u kind=%d ok=%d",
@@ -999,6 +1052,13 @@ void Replicator::applyTargets(GameWorld* gw) {
             } else {
                 d.furnNoSeeTick = 0;
                 d.furnPeerUpTick = 0;
+                // 2026-11-19 (3): the exit "held" for one tick and the body's own AI
+                // lay down again 200 ms later, so this reset re-armed the first-try
+                // path every tick: 7210 exits in 40 min on the join, bar and barracks
+                // NPCs jerking in and out of bed. The back-off only counts once the
+                // body has stayed out for a while.
+                if (d.bedExitTry != 0 && (now - d.bedExitMs) > 6000)
+                    d.bedExitTry = 0;
                 d.furnHandKind = 0; // out of furniture on both sides
             }
         }
@@ -1053,7 +1113,21 @@ void Replicator::applyTargets(GameWorld* gw) {
                     }
                 }
             }
-            if (!coop::bodyIsDown(localBs)) engine::knockDown(c, true);
+            // A death the OWNER reported is made a real death here (2026-11-19: a
+            // dead animal stood up on the join, fell and lay
+            // unconscious while it was dead on the host). The copy used to be
+            // only HELD down with an 8 s KO timer the drive re-topped every
+            // frame - and the host stops streaming a corpse, so the moment the
+            // stream went stale nothing re-topped it and the copy woke up.
+            const bool ownerDead = d.deathLatched || (out.bodyState & BODY_DEAD) != 0;
+            if (ownerDead && killCopiesEnabled() && !(localBs & BODY_DEAD)) {
+                if (engine::makeCopyDead(c)) {
+                    char kb[128]; _snprintf(kb, sizeof(kb) - 1,
+                        "[death] copy killed hand=%u,%u (owner reported death)",
+                        out.hIndex, out.hSerial);
+                    kb[sizeof(kb) - 1] = '\0'; coop::logLine(kb);
+                }
+            } else if (!coop::bodyIsDown(localBs)) engine::knockDown(c, true);
             else                          { engine::holdDown(c, holdSec); d.carriedDown = false; }
             // A ragdoll/KO falls independently on each client (and the join's local
             // AI may have walked the body elsewhere before the down state arrived),
@@ -1101,6 +1175,31 @@ void Replicator::applyTargets(GameWorld* gw) {
             d.downApplied = false;
             d.physHealNpc = true; // a KO/carry destroyed its controller (see below)
         }
+        // Upright heal (2026-11-19 session, 00:49: a creature the host had revived
+        // with its chest at -23 "walked as if lying in a bed" on the join). The
+        // one-shot release above does not clear the copy's local unconscious flag,
+        // and the copy's medical model - fed the owner's wounds, chest included -
+        // keeps it out, so the puppet dragged a lying body around. While the owner
+        // streams it upright and nothing latches it down, a copy still reading down
+        // after UPRIGHT_HEAL_MS is stood up and its flag cleared, on that cadence.
+        if (!crawling && !coop::bodyIsDown(out.bodyState) && !d.koLatched && !d.deathLatched &&
+            !coop::bodyIsCarried(out.bodyState)) {
+            const unsigned long UPRIGHT_HEAL_MS = 700;
+            if (coop::bodyIsDown(engine::readBodyState(c))) {
+                if (d.uprightDownSince == 0) d.uprightDownSince = now;
+                else if (now - d.uprightDownSince >= UPRIGHT_HEAL_MS) {
+                    d.uprightDownSince = now;
+                    bool ok = engine::forceCopyConscious(c);
+                    d.physHealNpc = true;
+                    char b[144]; _snprintf(b, sizeof(b) - 1,
+                        "[heal] UPRIGHT hand=%u,%u ok=%d (owner upright, copy down)",
+                        out.hIndex, out.hSerial, ok ? 1 : 0);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+            } else {
+                d.uprightDownSince = 0;
+            }
+        }
         // ---- Locomotion-body restore (squad copies) ------------------------------
         // Reached only by a body the stream says is UPRIGHT and free (the down,
         // carried, furniture and crawl branches above all continue out). Kenshi
@@ -1138,20 +1237,38 @@ void Replicator::applyTargets(GameWorld* gw) {
         // control with the walk right after the wake: stuck walk frames 26% -> 9%
         // with this). Once the OWNER walks and is not itself getting up, the
         // copy's get-up is stale: end it and re-issue the walk at once.
+        // Backoff (2026-11-19 field log, join): after a fight KO the engine
+        // re-armed the get-up (task 65) on the very next frame after every
+        // endAction - one body was released 57 times at 4 Hz, each a visible
+        // stand/collapse twitch. A get-up that comes straight back is the
+        // engine insisting: double the gap per re-arm and, after 4, let the
+        // engine finish it (the drive catches up once the body stands).
+        unsigned long getUpGap = GETUP_HEAL_MS;
+        for (unsigned int gi = 0; gi < d.getUpHealMiss && getUpGap < 4000; ++gi) getUpGap *= 2;
         if (out.cMoving != 0 && !coop::taskIsGetUp((int)out.task) &&
-            (now - d.getUpHealTick) >= GETUP_HEAL_MS) {
+            d.getUpHealMiss < 4 && (now - d.getUpHealTick) >= getUpGap) {
             int lt = engine::readTaskKey(c);
             if (coop::taskIsGetUp(lt) && !coop::bodyIsDown(engine::readBodyState(c))) {
+                // Re-armed within 2 s of our last release = a miss.
+                if (d.getUpHealTick != 0 && (now - d.getUpHealTick) < getUpGap + 2000)
+                    ++d.getUpHealMiss;
+                else
+                    d.getUpHealMiss = 0;
                 d.getUpHealTick = now;
                 bool ok = engine::endAction(c);
                 d.haveDest = false;            // the next walk branch re-issues the order
                 ++getUpHeal_;
                 char b[160]; _snprintf(b, sizeof(b) - 1,
-                    "[heal] GETUP hand=%u,%u task=%d ok=%d after=%d",
-                    out.hIndex, out.hSerial, lt, ok ? 1 : 0, engine::readTaskKey(c));
+                    "[heal] GETUP hand=%u,%u task=%d ok=%d after=%d miss=%u",
+                    out.hIndex, out.hSerial, lt, ok ? 1 : 0, engine::readTaskKey(c),
+                    d.getUpHealMiss);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             }
         }
+        // The body left its get-up on its own: re-arm the heal for the next KO.
+        if (d.getUpHealMiss != 0 && (now - d.getUpHealTick) >= 3000 &&
+            !coop::taskIsGetUp(engine::readTaskKey(c)))
+            d.getUpHealMiss = 0;
         // The same staleness for a SEAT/work pose (recruit_seated): a bar NPC
         // recruited off its stool keeps the stool action on the peer's copy -
         // posed by our applyOrder under the key the re-key retired, or natively
@@ -1319,6 +1436,72 @@ void Replicator::applyTargets(GameWorld* gw) {
                     }
                 }
             }
+            // Running owner (2026-11-18 field report: "while running in a fight the
+            // friend's character was turned toward the enemies chasing it"). The
+            // owner keeps streaming a combat task while it runs with weapons out,
+            // so this copy kept its attack goal and was moved by short move orders
+            // that its engine executes as combat footwork - strafing and back-
+            // pedalling with its face on the target - while the owner's heading
+            // was applied only on 60 u snaps. When the owner runs AWAY from (or
+            // past) its target, mirror it the way the glide drive mirrors a
+            // running squad copy: pose + heading + locomotion every frame, attack
+            // goal dropped, local AI quiet. A charge (closing on the target) stays
+            // with the fight, which owns that footwork.
+            if (isSquad && haveActual && combatRunGlideEnabled()) {
+                bool runNow = out.cMoving != 0 && out.cSpeed >= COMBAT_RUN_SPEED;
+                if (runNow && wantTgt) {
+                    float qx = 0.0f, qy = 0.0f, qz = 0.0f;
+                    if (engine::readPos(wantTgt, &qx, &qy, &qz)) {
+                        float tx = qx - out.x, tz = qz - out.z;
+                        float mx = out.cMotionX, mz = out.cMotionZ;
+                        float tl = std::sqrt(tx * tx + tz * tz);
+                        float ml = std::sqrt(mx * mx + mz * mz);
+                        if (tl > 1.0f && ml > 0.01f && (tx * mx + tz * mz) > 0.3f * tl * ml)
+                            runNow = false; // closing on the target: a charge
+                    }
+                }
+                if (runNow) {
+                    d.runOffSinceMs = 0;
+                    if (d.runSinceMs == 0) d.runSinceMs = now;
+                } else {
+                    d.runSinceMs = 0;
+                    if (d.runActive && d.runOffSinceMs == 0) d.runOffSinceMs = now;
+                }
+                if (!d.runActive && d.runSinceMs != 0 &&
+                    (now - d.runSinceMs) >= COMBAT_RUN_ENTER_MS) {
+                    d.runActive = true;
+                    engine::clearGoals(c);
+                    engine::haltMovement(c);
+                    // The fight resumes as a fresh episode once the owner stops.
+                    d.combatArmed = false; d.combatOrders = 0; d.combatLockTick = 0;
+                    d.combatTgtIdx = 0; d.combatTgtSer = 0; d.haveDest = false;
+                    char b[160]; _snprintf(b, sizeof(b) - 1,
+                        "[combat] run ENTER hand=%u,%u cSpeed=%.1f",
+                        out.hIndex, out.hSerial, out.cSpeed);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+                if (d.runActive && d.runOffSinceMs != 0 &&
+                    (now - d.runOffSinceMs) >= COMBAT_RUN_EXIT_MS) {
+                    d.runActive = false; d.runOffSinceMs = 0; d.haveDest = false;
+                    char b[128]; _snprintf(b, sizeof(b) - 1,
+                        "[combat] run EXIT hand=%u,%u", out.hIndex, out.hSerial);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+                if (d.runActive) {
+                    d.dbgRegime = DR_GLIDE;
+                    if (aiSuspend_) engine::addAiSuspend(c);
+                    if (!engine::hasPhysicsBody(c)) engine::restoreMovement(c);
+                    engine::applyRaw(c, out);
+                    engine::applyMotion(c, true, out.cSpeed, out.cMotionX, out.cMotionY,
+                                        out.cMotionZ);
+                    engine::applyPhysMotion(c, out.cMotionX, out.cMotionY, out.cMotionZ,
+                                            out.cSpeed);
+                    ++combatRunFrames_;
+                    d.parked = false;
+                    d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az;
+                    continue;
+                }
+            }
             // The copy is engaged with the WRONG body (the local brawl grabbed it).
             // Judged on BODIES, not hands: comparing the local target hand with
             // the wire key latched "wrong" for the right body under a re-keyed or
@@ -1422,6 +1605,20 @@ void Replicator::applyTargets(GameWorld* gw) {
                 // gaps), and a flicker-reset defeated the backoff (measured:
                 // 30 orders/hand, every one at the base interval).
                 reissue = true;
+            } else if (!isSquad && wantTgt && !hostWaiting && !localFighting &&
+                       d.combatOrders > COMBAT_REISSUE_CAP &&
+                       (now - d.combatTick) >= COMBAT_REISSUE_MAX_MS) {
+                // Past the cap the copy used to be left alone for the rest of the
+                // fight. Its position and facing are the host's every frame (combat
+                // puppet), so a copy that never engaged stood with its weapon down
+                // and only turned on the spot while the host's body swung (field
+                // report 2026-11-19). Keep trying at the slowest rate - one ordered
+                // attack per backoff cap - instead of giving up for good.
+                reissue = true;
+                { char lb[128]; _snprintf(lb, sizeof(lb) - 1,
+                    "[combat] late re-arm hand=%u,%u tgt=%u,%u n=%u",
+                    out.hIndex, out.hSerial, out.sIndex, out.sSerial, d.combatOrders);
+                  lb[sizeof(lb) - 1] = '\0'; coop::logLine(lb); }
             }
             if (reissue) {
                 // A seat-INJECTED copy (applyRest committed a player order at the
@@ -1515,7 +1712,39 @@ void Replicator::applyTargets(GameWorld* gw) {
             // _002001_s2: 110 and 52 snaps of copies that kept fighting 20+ u off;
             // steering there whenever the source stood still doubled the
             // persistent snaps, runs 20261024_005408 / _005410_s2).
-            if (haveActual) {
+            //
+            // Combat puppet (2026-11-18: 23 "[combat] snap" per minute in the field,
+            // "positions differ during the fight"): a world-NPC combatant keeps its
+            // local AI - it chooses and lands the swings, so the attack animations
+            // play - but its POSITION and FACING are the host's every frame (the
+            // puppet follower), so the bands, slides and leave-teleports below no
+            // longer run for it. Its local footwork is overwritten before render.
+            //
+            // 2026-11-19 (2): ...and so is a SQUAD copy whose owner fights a target
+            // this client cannot order it onto (not loaded here, or held far away
+            // from the owner - wantTgt is 0 for both). It has no local fight to
+            // animate, so it stood where the fight began while its owner moved, and
+            // the leave test teleported it to the owner every 3 s (host log: 14
+            // snaps of the join's character at drift 20-143 u in 90 s, localFight=0).
+            // Follow the owner's pose every frame instead.
+            const bool squadNoTarget = isSquad && !localFighting && wantTgt == 0 &&
+                                       !hostWaiting;
+            const bool combatPuppet = (!isSquad || squadNoTarget) && haveActual &&
+                                      combatPuppetEnabled();
+            if (combatPuppet) {
+                float cvx = 0.0f, cvy = 0.0f, cvz = 0.0f;
+                EntityState nn;
+                float cvl = 0.0f;
+                if (d.interp.latest(&nn, &cvx, &cvy, &cvz))
+                    cvl = std::sqrt(cvx * cvx + cvy * cvy + cvz * cvz);
+                unsigned long cseg = d.interp.lastSegMs();
+                // Mirror the gait whenever the body actually translates, or it
+                // slides without a walk clip (anim_truth floatFrac 0.32).
+                puppetPlace(c, d, out, cvl, teleportEdge, cseg > 250, now, ax, ay, az,
+                            interpMode, cseg, out.cMoving != 0 || cvl > NPC_MOVE_VEL, false);
+                ++combatPuppetFrames_;
+            }
+            if (haveActual && !combatPuppet) {
                 bool arming = !hostWaiting && !localFighting &&
                               d.combatOrders <= COMBAT_REISSUE_CAP;
                 float drift = dist3(ax, ay, az, out.x, out.y, out.z);
@@ -1679,6 +1908,14 @@ void Replicator::applyTargets(GameWorld* gw) {
         // Divergence is the tell a blip is not: a real gap in a real fight keeps
         // the copy near the body it stands for. Past the true-leave distance,
         // stop betting - disarm now and let the ordinary drive walk it home.
+        // Combat run-glide state belongs to the combat branch; the stream left it.
+        if (d.runActive) {
+            d.runActive = false; d.haveDest = false;
+            char b[128]; _snprintf(b, sizeof(b) - 1,
+                "[combat] run EXIT hand=%u,%u (combat task ended)", out.hIndex, out.hSerial);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        d.runSinceMs = 0; d.runOffSinceMs = 0;
         if (d.combatArmed) {
             float heldDrift = haveActual
                 ? dist3(ax, ay, az, out.x, out.y, out.z) : 0.0f;
@@ -1692,8 +1929,26 @@ void Replicator::applyTargets(GameWorld* gw) {
             const float holdLimit =
                 (isSquad && (now - d.combatSeenTick) >= combatConvergeMs_)
                     ? combatSnapDist_ : combatBigSnapDist_;
+            // A squad owner that dropped the combat task and is RUNNING has left the
+            // fight: holding would leave the copy brawling in place (facing its
+            // attackers) while its owner runs off. Release it to the locomotion drive.
+            const bool ownerRanOff = isSquad && combatRunGlideEnabled() &&
+                                     out.cMoving != 0 && out.cSpeed >= COMBAT_RUN_SPEED;
             if ((now - d.combatSeenTick) < COMBAT_DISARM_MS &&
-                heldDrift <= holdLimit) {
+                heldDrift <= holdLimit && !ownerRanOff) {
+                // Combat puppet: the fight is held (goal kept), the pose is not.
+                if (!isSquad && haveActual && combatPuppetEnabled()) {
+                    float hvx = 0.0f, hvy = 0.0f, hvz = 0.0f;
+                    EntityState hn;
+                    float hvl = 0.0f;
+                    if (d.interp.latest(&hn, &hvx, &hvy, &hvz))
+                        hvl = std::sqrt(hvx * hvx + hvy * hvy + hvz * hvz);
+                    unsigned long hseg = d.interp.lastSegMs();
+                    puppetPlace(c, d, out, hvl, teleportEdge, hseg > 250, now, ax, ay, az,
+                                interpMode, hseg, out.cMoving != 0 || hvl > NPC_MOVE_VEL,
+                                false);
+                    d.dbgRegime = DR_COMBAT;
+                }
                 if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
                 continue;
             }
@@ -1769,7 +2024,22 @@ void Replicator::applyTargets(GameWorld* gw) {
                     // drifted past it, converge with a real walk (walkTo keeps
                     // the carried body on the shoulder - move orders don't
                     // release a carry); far gone, snap once on a cooldown.
-                    if (haveActual) {
+                    if (haveActual && carrierPuppetEnabled()) {
+                        // Carrier puppet (2026-11-18): placed at the host pose
+                        // every frame like any moving NPC (it walked on move
+                        // orders and jumped on 20 u snaps: ~260 jumps per body-
+                        // minute). The local AI keeps running the carry walk;
+                        // the shoulder attach rides the placement.
+                        float kvx = 0.0f, kvy = 0.0f, kvz = 0.0f;
+                        EntityState kn;
+                        float kvl = 0.0f;
+                        if (d.interp.latest(&kn, &kvx, &kvy, &kvz))
+                            kvl = std::sqrt(kvx * kvx + kvy * kvy + kvz * kvz);
+                        unsigned long kseg = d.interp.lastSegMs();
+                        puppetPlace(c, d, out, kvl, teleportEdge, kseg > 250, now, ax, ay, az,
+                                    interpMode, kseg, true, true);
+                        ++carrierPuppetFrames_;
+                    } else if (haveActual) {
                         float drift = dist3(ax, ay, az, out.x, out.y, out.z);
                         if (drift > COMBAT_SNAP_DIST &&
                             (now - d.combatSnapTick) >= COMBAT_SNAP_COOL_MS) {
@@ -1838,7 +2108,11 @@ void Replicator::applyTargets(GameWorld* gw) {
             // same tick. Bodies in host-reported combat/down never reach here
             // (their branches continue earlier), so trust only governs the
             // locomotion/rest regime.
-            if (gateAuthority_) {
+            // A moving body under the puppet drive is never handed to its own AI:
+            // trust would stop the per-frame placement mid-walk.
+            // Puppet mode 2: never - a trusted body runs its own AI and faces
+            // wherever that AI turns it (37-57% off the host's facing).
+            if (gateAuthority_ && npcPuppetMode() < 2 && !(npcPuppetMode() > 0 && hostMoving)) {
                 float drift = haveActual ? dist3(ax, ay, az, out.x, out.y, out.z) : 1e9f;
                 bool inPos = (drift <= TRUST_DRIFT_MAX);
                 if (agree && inPos) {
@@ -2059,6 +2333,7 @@ void Replicator::applyTargets(GameWorld* gw) {
         if (ownerPaced) npcMoving = true;
         if (!isSquad) {
             if (d.wasMoving && !npcMoving) {
+                ++d.limpFlips;
                 if (midTier) ++restFlipMid_;
                 else         ++restFlipNpc_;
                 if (regimeDebug()) {
@@ -2116,7 +2391,29 @@ void Replicator::applyTargets(GameWorld* gw) {
         // trailed farther). Movers stay driven - the anti-zombie fix - and
         // the release also skips the AI suspend below, so the local AI can
         // idle the body naturally between host movements.
-            if (!isSquad && midTier && !npcMoving) {
+            // ...except a body the host has SEATED (stool, chair, bench, throne).
+            // Released, its local AI - already detached from its town schedule by
+            // an earlier drive - picked another seat or none, the census walked
+            // it 50-60 u off and froze it standing (2026-11-18 session: one bar
+            // drunk FROZEN 1093 times while sitting at stool 515 on the host;
+            // "the NPC sat on the host and stood by the table on the client").
+            // A held seat costs one order and an AI-suspend slot, not a per-
+            // tick drive.
+            const bool seatHold = engine::taskIsSeatPose((int)out.task) ||
+                                  engine::isMachineWorkTask((int)out.task);
+            if (!isSquad && midTier && !npcMoving && seatHold && seatHoldEnabled()) {
+                if (!d.midSeatLogged) {
+                    d.midSeatLogged = true;
+                    char b[128]; _snprintf(b, sizeof(b) - 1,
+                        "[pose] mid-seat hold hand=%u,%u task=%u",
+                        out.hIndex, out.hSerial, (unsigned)out.task);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+            } else if (!isSquad && midTier && !npcMoving && npcPuppetMode() < 2) {
+                // (Puppet mode 2 holds a stopped mid body on the drive instead:
+                // the host keeps its stream alive - MID_STILL_MS - and the rest
+                // drive parks it on the host's pose and facing, so it is never
+                // handed to local AI, census-walked, frozen or popped.)
                 drivenChars_.erase(c);
                 drivenSeen_.erase(c); // wide pass may census-park it again
                 d.parked = false; d.haveDest = false;
@@ -2200,6 +2497,7 @@ void Replicator::applyTargets(GameWorld* gw) {
         // the next time it stops we re-evaluate the host's (possibly new) task.
         bool genuinelyMoving = isSquad ? (hostMoving || squadSettle) : npcMoving;
         if (genuinelyMoving) {
+            d.lastMoveTickMs = now;
             // Seat-break (2026-07-11): a rest pose applyRest committed is a
             // PLAYER-RANK order, and a seated body both ignores goal-level
             // movement and re-places itself at the fixture - applyRaw
@@ -2390,7 +2688,15 @@ void Replicator::applyTargets(GameWorld* gw) {
             engine::CarryRead gcr;
             carrierNow = engine::readCarry(c, &gcr) && gcr.carrying;
         }
-        if (carrierNow) { d.glideUntilMs = 0; d.glideStallSinceMs = 0; }
+        if (carrierNow) {
+            // A carrier may not glide, but its copy can still be too slow (the
+            // host's 'Tsarapina' carrying a wounded squad-mate, 2026-11-19 (4)
+            // 19:37: copy 14 u/s against 31, a 750 u teleport every 8 s at x5).
+            // Remember the verdict; the walk branch bleeds the deficit instead.
+            if (isSquad && d.glideUntilMs != 0 && (long)(d.glideUntilMs - now) > 0)
+                d.carrierLagUntilMs = now + 3000;
+            d.glideUntilMs = 0; d.glideStallSinceMs = 0;
+        }
         // Config::glide (KENSHICOOP_GLIDE / coop_config.json "glide") = 0: walk
         // drive + snap gate only.
         bool squadGlide = glide_ && isSquad && !carrierNow && d.glideUntilMs != 0 &&
@@ -2434,6 +2740,23 @@ void Replicator::applyTargets(GameWorld* gw) {
             engine::applyMotion(c, true, out.cSpeed, out.cMotionX, out.cMotionY, out.cMotionZ);
             engine::applyPhysMotion(c, out.cMotionX, out.cMotionY, out.cMotionZ, out.cSpeed);
             d.parked = false; d.haveDest = false;
+        } else if (!isSquad && genuinelyMoving && haveActual && !crawling && !carrierNow &&
+                   npcPuppetMode() > 0 && (!midTier || npcPuppetMode() >= 2)) {
+            // ---- NPC puppet glide (2026-11-18: "NPCs on the client jerk and
+            // teleport instead of moving smoothly; position and rotation must be
+            // the host's"). A moving world-NPC copy is no longer walk-ordered and
+            // gap-snapped: every frame it is PLACED at the interpolated host pose
+            // (position + heading), with the host's locomotion mirrored so its
+            // walk/run clip plays - the squad glide recipe. Its AI is suspended
+            // (above), so nothing local fights the placement. The follower
+            // integrates from the pose it placed last frame (never the engine's
+            // position, so local footwork cannot accumulate) and is speed-
+            // limited: a starved or stepped stream turns into a fast continuous
+            // catch-up instead of a jump. Only a source teleport, a huge gap or a
+            // far first acquisition is placed instantly.
+            d.dbgRegime = DR_PUPPET;
+            puppetPlace(c, d, out, vlen, teleportEdge, midTier, now, ax, ay, az,
+                        interpMode, segMs, true, true);
         } else if (genuinelyMoving && haveActual && gapNewest > snapGate && snapOk) {
             // Fell behind / source warped: hard-snap to the true position
             // (no-halt teleport keeps the clip phase advancing).
@@ -2441,6 +2764,19 @@ void Replicator::applyTargets(GameWorld* gw) {
             d.dbgRegime = DR_SNAP;
             if (isSquad) {
                 ++hardSnapSquad_;
+                // Repeat snaps = a copy that will not keep pace (2026-11-19 host
+                // log: the friend's PC snapped 150 u forward every 0.9 s while
+                // running - each snap reset the 1 s lag test above before it
+                // could fire). A second snap within 2.5 s hands the run to the
+                // glide, which places the body every frame until it stops.
+                if (glide_ && !carrierNow && d.sqSnapMs != 0 && (now - d.sqSnapMs) < 2500) {
+                    d.glideUntilMs = now + GLIDE_HOLD_MS;
+                    ++glideStallEnters_;
+                    char rb[128]; _snprintf(rb, sizeof(rb) - 1,
+                        "[glide] repeat-snap hand=%u,%u gap=%.1f",
+                        out.hIndex, out.hSerial, gapNewest);
+                    rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+                }
                 d.sqSnapMs = now;
                 logHardSnap(c, out, "squad", gapNewest, vlen, snapGate, d.haveDest);
             } else {
@@ -2701,6 +3037,9 @@ void Replicator::applyTargets(GameWorld* gw) {
                 // deficit into a velocity-gate teleport. A no-halt placement that
                 // keeps the body's own orientation (the walk owns the facing).
                 float bleed = driveBleed();
+                if (carrierNow && d.carrierLagUntilMs != 0 &&
+                    (long)(d.carrierLagUntilMs - now) > 0 && bleed < 1.0f)
+                    bleed = 1.0f;
                 float allow = vlen * BLEED_ALLOW_SEC + WALK_ARRIVE_DIST;
                 if (bleed > 0.0f && ddt > 0 && ddt <= 250 && gapNewest > allow) {
                     float step = bleed * vlen * (float)ddt / 1000.0f;
@@ -2940,11 +3279,272 @@ void Replicator::applyTargets(GameWorld* gw) {
                 d.dbgStillF = 0;
             }
         }
+        if (!isSquad && haveActual) {
+            // One line a second per wounded copy that moved, at most 6 a second
+            // in all: which regime drew it, how the stream and the body moved.
+            ++d.limpFrames;
+            if (d.dbgRegime == DR_PUPPET) ++d.limpPup;
+            else if (d.dbgRegime == DR_REST) ++d.limpRest;
+            else if (d.dbgRegime == DR_WALK) ++d.limpWalk;
+            else ++d.limpOther;
+            if (d.limpLogMs == 0) { d.limpLogMs = now; d.limpX = ax; d.limpZ = az; }
+            else if (now - d.limpLogMs >= 1000) {
+                static unsigned long s_limpSec = 0; static unsigned int s_limpN = 0;
+                if (now - s_limpSec >= 1000) { s_limpSec = now; s_limpN = 0; }
+                float mdx = ax - d.limpX, mdz = az - d.limpZ;
+                float moved = std::sqrt(mdx * mdx + mdz * mdz);
+                if ((moved > 0.5f || d.limpFlips != 0) && s_limpN < 6) {
+                    float leg = engine::worstLegFrac(c);
+                    if (leg < 0.6f) {
+                        ++s_limpN;
+                        char lb[288]; _snprintf(lb, sizeof(lb) - 1,
+                            "[limp] hand=%u,%u leg=%.2f moved=%.1f vlen=%.1f cSpeed=%.1f cMoving=%d "
+                            "gap=%.1f seg=%lu mid=%d crawl=%d body=0x%x task=%u flips=%u "
+                            "frames=%u pup=%u rest=%u walk=%u other=%u mode=%d",
+                            out.hIndex, out.hSerial, leg, moved, vlen, out.cSpeed,
+                            out.cMoving ? 1 : 0, gapNewest, segMs, midTier ? 1 : 0,
+                            crawling ? 1 : 0, (unsigned)out.bodyState, (unsigned)out.task,
+                            d.limpFlips, d.limpFrames, d.limpPup, d.limpRest, d.limpWalk,
+                            d.limpOther, interpMode);
+                        lb[sizeof(lb) - 1] = '\0'; coop::logLine(lb);
+                    }
+                }
+                d.limpLogMs = now; d.limpX = ax; d.limpZ = az; d.limpFlips = 0;
+                d.limpFrames = d.limpPup = d.limpRest = d.limpWalk = d.limpOther = 0;
+            }
+        }
         if (haveActual) { d.haveActual = true; d.lx = ax; d.ly = ay; d.lz = az; }
     }
+    poseFidelityPass(gw, now);
     pruneDriveGrace(now);
     logDriveTelemetry(now);
     ageOutStaleTargets(now);
+}
+
+// ---- NPC puppet placement (shared by the walk and combat regimes) -----------
+// Place the copy at the interpolated host pose for this frame: a speed-limited
+// follower integrated from the pose placed last frame (never the engine's), a
+// turn-rate-limited heading, the movement layer AND the rendered mesh set, and
+// (mirror) the host locomotion copied so the walk/run clip plays.
+void Replicator::puppetPlace(Character* c, Driven& d, const EntityState& out, float vlen,
+                             bool teleportEdge, bool midTier, unsigned long now,
+                             float ax, float ay, float az, int interpMode,
+                             unsigned long segMs, bool mirror, bool turnLimit) {
+    if (!d.pupActive || (now - d.pupMs) > 250) {
+        // (Re-)entry: drop any committed walk so nothing fights placement.
+        d.pupActive = true;
+        engine::haltMovement(c);
+        ++puppetEnters_;
+    }
+    ++puppetFrames_;
+    if (!engine::hasPhysicsBody(c) && engine::restoreMovement(c)) ++physHeal_;
+    float px, py, pz, ph;
+    if (d.pupHave && (now - d.pupMs) <= 500) {
+        px = d.pupX; py = d.pupY; pz = d.pupZ; ph = d.pupH;
+    } else {
+        px = ax; py = ay; pz = az;
+        if (!engine::readYaw(c, &ph)) ph = out.heading;
+        d.pupHave = false;
+    }
+    float dtS = d.pupHave ? (float)(now - d.pupMs) / 1000.0f : 0.0f;
+    float gx = out.x - px, gy = out.y - py, gz = out.z - pz;
+    float gap = std::sqrt(gx * gx + gy * gy + gz * gz);
+    const float sm = simMult();
+    const float PUPPET_TP_DIST = 300.0f * sm;   // game speed scales every distance here
+    bool tp = teleportEdge || gap > PUPPET_TP_DIST || (!d.pupHave && gap > 60.0f * sm);
+    if (tp) {
+        px = out.x; py = out.y; pz = out.z; ph = out.heading;
+        ++puppetTps_;
+        if (gap > 20.0f) {
+            char b[176]; _snprintf(b, sizeof(b) - 1,
+                "[puppet] tp hand=%u,%u gap=%.1f edge=%d first=%d mid=%d",
+                out.hIndex, out.hSerial, gap, teleportEdge ? 1 : 0,
+                d.pupHave ? 0 : 1, midTier ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    } else if (!d.pupHave) {
+        // First frame from the engine's pose: no step yet, just start.
+    } else {
+        // Catch-up speed: at least twice the streamed locomotion speed and
+        // 1.5x the stream's own velocity (game speed included), floor 40.
+        float vmax = 2.0f * out.cSpeed * sm;
+        if (vmax < 1.5f * vlen) vmax = 1.5f * vlen;
+        if (vmax < 40.0f * sm) vmax = 40.0f * sm;
+        float maxStep = vmax * dtS;
+        if (gap > maxStep && gap > 0.001f) {
+            float k = maxStep / gap;
+            px += gx * k; py += gy * k; pz += gz * k;
+            ++puppetClamps_;
+            if (poseFidEnabled() && now - d.pupClampLogMs >= 2000) {
+                d.pupClampLogMs = now;
+                char b[200]; _snprintf(b, sizeof(b) - 1,
+                    "[puppet] clamp hand=%u,%u gap=%.1f vmax=%.1f cSpeed=%.1f vlen=%.1f "
+                    "dt=%.0fms mid=%d seg=%lu mode=%d",
+                    out.hIndex, out.hSerial, gap, vmax, out.cSpeed, vlen, dtS * 1000.0f,
+                    midTier ? 1 : 0, segMs, interpMode);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        } else {
+            px = out.x; py = out.y; pz = out.z;
+        }
+        // Turn-rate limit (720 deg/s) so a heading flip is a turn.
+        float dh = out.heading - ph;
+        while (dh > 3.14159265f) dh -= 6.2831853f;
+        while (dh < -3.14159265f) dh += 6.2831853f;
+        if (turnLimit) {
+            float maxTurn = 12.566f * dtS * sm;
+            if (dh > maxTurn) dh = maxTurn; else if (dh < -maxTurn) dh = -maxTurn;
+        }
+        ph += dh;
+    }
+    EntityState pe = out;
+    pe.x = px; pe.y = py; pe.z = pz; pe.heading = ph;
+    engine::applyRaw(c, pe);
+    if (visualPoseMode() > 1) engine::setVisualPose(c, px, py, pz, ph);
+    if (poseFidEnabled() && !turnLimit && now - d.pupYawLogMs >= 1000) {
+        float ry = 0.0f;
+        if (engine::readYaw(c, &ry)) {
+            float dd = ry - ph;
+            while (dd > 3.14159265f) dd -= 6.2831853f;
+            while (dd < -3.14159265f) dd += 6.2831853f;
+            if (std::fabs(dd) > 0.26f) {
+                d.pupYawLogMs = now;
+                engine::CombatRead cr;
+                bool fight = engine::readCombat(c, &cr) && (cr.inCombat || cr.modeActive);
+                char b[200]; _snprintf(b, sizeof(b) - 1,
+                    "[puppet] yawfail hand=%u,%u set=%.3f read=%.3f fight=%d sw=%d tgt=%d",
+                    out.hIndex, out.hSerial, ph, ry, fight ? 1 : 0, cr.swordState,
+                    cr.hasTarget ? 1 : 0);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+    }
+    if (mirror) {
+        const bool mv = out.cMoving != 0 || vlen > NPC_MOVE_VEL;
+        // While catching up (clamped) the body moves faster than its owner: give
+        // the clip the speed and direction it actually travels, or its feet slide
+        // under a walk while it covers ground at a jog (2026-11-19: "town NPCs
+        // sometimes walk with the wrong animation").
+        float sx = px - d.pupPrevX, sz = pz - d.pupPrevZ;
+        float actual = (dtS > 0.0f) ? std::sqrt(sx * sx + sz * sz) / dtS : 0.0f;
+        if (d.pupHave && actual > out.cSpeed * 1.25f && actual > 1.0f) {
+            float inv = 1.0f / std::sqrt(sx * sx + sz * sz);
+            engine::applyMotion(c, true, actual, sx * inv * actual, 0.0f, sz * inv * actual);
+            engine::applyPhysMotion(c, sx * inv * actual, 0.0f, sz * inv * actual, actual);
+        } else {
+            engine::applyMotion(c, mv, out.cSpeed, out.cMotionX, out.cMotionY, out.cMotionZ);
+            engine::applyPhysMotion(c, out.cMotionX, out.cMotionY, out.cMotionZ, out.cSpeed);
+        }
+    }
+    d.pupPrevX = px; d.pupPrevZ = pz;
+    d.pupX = px; d.pupY = py; d.pupZ = pz; d.pupH = ph; d.pupMs = now; d.pupHave = true;
+    d.parked = false; d.haveDest = false;
+}
+
+// ---- Pose fidelity (KENSHICOOP_POSE_FID=1, diagnostic) ----------------------
+// After every placement this tick, how far is each driven WORLD-NPC copy from
+// the pose the stream says it should show (horizontal distance, yaw), and did
+// it JUMP - move this frame by much more than its target moved? Binned per
+// regime group and logged every 10 s as "[posefid]"; scripts\oracles\posefid.ps1
+// turns the bins into p50/p95 and jumps per body-minute.
+bool Replicator::poseFidEnabled() {
+    static int s = -1;
+    if (s < 0) {
+        const char* e = getenv("KENSHICOOP_POSE_FID");
+        s = (e && e[0] == '1') ? 1 : 0;
+    }
+    return s == 1;
+}
+
+void Replicator::poseFidelityPass(GameWorld* gw, unsigned long now) {
+    if (!poseFidEnabled()) return;
+    static const float EBIN[6] = { 1.0f, 2.0f, 5.0f, 10.0f, 20.0f, 50.0f };   // 7 bins
+    static const float YBIN[4] = { 5.0f, 15.0f, 45.0f, 90.0f };               // 5 bins
+    for (std::map<Key, Driven>::iterator it = targets_.begin(); it != targets_.end(); ++it) {
+        Driven& d = it->second;
+        if (d.fidMs != now || !d.fidC) continue;
+        Character* c = d.fidC;
+        if (engine::isLocalPlayerChar(gw, c)) continue; // world NPCs only
+        float x = 0, y = 0, z = 0, yaw = 0;
+        if (!engine::readPos(c, &x, &y, &z) || !engine::readYaw(c, &yaw)) continue;
+        int g;
+        switch (d.dbgRegime) {
+            case DR_COMBAT: g = 1; break;
+            case DR_REST: case DR_PAUSED: g = 2; break;
+            case DR_WALK: case DR_GLIDE: case DR_SNAP: case DR_PUPPET: g = 0; break;
+            case DR_DOWN: case DR_CARRIED: case DR_CRAWL: case DR_FURN: g = 4; break;
+            case DR_CARRIER: g = 5; break;
+            default: g = 3; break;
+        }
+        PoseFidAcc& a = poseFid_[g];
+        float ex = x - d.fidX, ez = z - d.fidZ;
+        float e = std::sqrt(ex * ex + ez * ez);
+        int eb = 0; while (eb < 6 && e >= EBIN[eb]) ++eb;
+        ++a.e[eb];
+        float dy = yaw - d.fidH;
+        while (dy > 3.14159265f) dy -= 6.2831853f;
+        while (dy < -3.14159265f) dy += 6.2831853f;
+        float ydeg = std::fabs(dy) * 57.29578f;
+        int yb = 0; while (yb < 4 && ydeg >= YBIN[yb]) ++yb;
+        ++a.y[yb];
+        ++a.n;
+        // Rendered facing (skeleton) vs the stream - what the player sees.
+        float ry = 0.0f;
+        if (engine::readRenderYaw(c, &ry)) {
+            float dr = ry - d.fidH;
+            while (dr > 3.14159265f) dr -= 6.2831853f;
+            while (dr < -3.14159265f) dr += 6.2831853f;
+            float rdeg = std::fabs(dr) * 57.29578f;
+            int rb = 0; while (rb < 4 && rdeg >= YBIN[rb]) ++rb;
+            ++a.r[rb];
+            if (now - d.fidRsLogMs >= 3000) {
+                d.fidRsLogMs = now;
+                float fx = 0.0f, fz = 0.0f; engine::readFacing(c, &fx, &fz);
+                char b[200]; _snprintf(b, sizeof(b) - 1,
+                    "[posefid] rs hand=%u,%u reg=%s head=%.3f ori=%.3f render=%.3f dir=%.3f",
+                    it->first.i, it->first.s, devRegimeName(d.dbgRegime), d.fidH, yaw, ry,
+                    std::atan2(fx, fz));
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+        if (d.fidHavePrev && now - d.fidPrevMs <= 200) {
+            float sx = x - d.fidPx, sz = z - d.fidPz;
+            float step = std::sqrt(sx * sx + sz * sz);
+            float tx = d.fidX - d.fidPtx, tz = d.fidZ - d.fidPtz;
+            float tstep = std::sqrt(tx * tx + tz * tz);
+            // A JUMP is a teleport-like move: faster than any run (300 u/s), over
+            // 3 u, and well beyond what the target itself did this frame. Speed
+            // terms keep it independent of the frame rate.
+            float dtS = (float)(now - d.fidPrevMs) / 1000.0f;
+            if (dtS > 0.0f && step > 3.0f && step / dtS > 300.0f && step > 3.0f * tstep)
+                ++a.jumps;
+            a.bodyMs += (now - d.fidPrevMs);
+        }
+        d.fidHavePrev = true; d.fidPrevMs = now;
+        d.fidPx = x; d.fidPz = z; d.fidPtx = d.fidX; d.fidPtz = d.fidZ;
+    }
+    if (now - poseFidLogMs_ < 10000) return;
+    poseFidLogMs_ = now;
+    {
+        char pb[160]; _snprintf(pb, sizeof(pb) - 1,
+            "[puppet] mode=%d frames=%lu enters=%lu tps=%lu clamps=%lu combat=%lu censusGlide=%lu carrier=%lu",
+            npcPuppetMode(), puppetFrames_, puppetEnters_, puppetTps_, puppetClamps_,
+            combatPuppetFrames_, censusGlideFrames_, carrierPuppetFrames_);
+        pb[sizeof(pb) - 1] = '\0'; coop::logLine(pb);
+    }
+    static const char* GN[6] = { "move", "combat", "rest", "other", "body", "carrier" };
+    for (int g = 0; g < 6; ++g) {
+        PoseFidAcc& a = poseFid_[g];
+        if (a.n == 0) continue;
+        char b[320]; _snprintf(b, sizeof(b) - 1,
+            "[posefid] grp=%s n=%lu e=%lu,%lu,%lu,%lu,%lu,%lu,%lu y=%lu,%lu,%lu,%lu,%lu "
+            "jumps=%lu bodyMs=%lu r=%lu,%lu,%lu,%lu,%lu",
+            GN[g], a.n, a.e[0], a.e[1], a.e[2], a.e[3], a.e[4], a.e[5], a.e[6],
+            a.y[0], a.y[1], a.y[2], a.y[3], a.y[4], a.jumps, a.bodyMs,
+            a.r[0], a.r[1], a.r[2], a.r[3], a.r[4]);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        a = PoseFidAcc();
+    }
 }
 
 // --- Drive-tick epilogue phases (Phase 7 Workstream C) --------------------
@@ -3213,7 +3813,16 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
     // inject it as a pose. A stationary carrier just parks like a task-less body
     // (the engine's own carry attach keeps the shoulder animation running).
     bool syntheticCarry = coop::taskIsCarry(out.task);
-    if (!syntheticCarry && out.task != TASK_NONE && out.task != d.issuedTask) {
+    // An NPC whose owner already reports the fixture task while it still WALKS to
+    // the fixture (in steps, with still phases longer than the walk hold) flipped
+    // walk -> rest -> walk several times a second, and every flip was a pose
+    // order followed by a seat-break walk order: the copy shook on the spot
+    // (session 2026-11-19 (4): 549 seat-breaks, bursts of 4 order/break pairs in
+    // 2 s on one bed). Commit a pose only once the stream has been still a while.
+    const unsigned long REST_POSE_SETTLE_MS = 1500;
+    const bool settling = !isSquad && !d.taskApplied && d.lastMoveTickMs != 0 &&
+                          (now - d.lastMoveTickMs) < REST_POSE_SETTLE_MS;
+    if (!settling && !syntheticCarry && out.task != TASK_NONE && out.task != d.issuedTask) {
         { char b[96]; _snprintf(b, sizeof(b) - 1,
             "[pose] rest re-arm task %u -> %u", (unsigned)d.issuedTask,
             (unsigned)out.task); b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
@@ -3245,7 +3854,7 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
     // Commit a reproducible pose (sit/operate) at the SAME fixture, once.
     // Attempts are throttled (TASK_RETRY_MS) so a retried far-fixture apply
     // doesn't clearGoals every frame.
-    if (!syntheticCarry && out.task != TASK_NONE && !d.taskBad && !d.taskApplied &&
+    if (!settling && !syntheticCarry && out.task != TASK_NONE && !d.taskBad && !d.taskApplied &&
         (d.taskRetries == 0 || (now - d.taskTick) >= TASK_RETRY_MS)) {
         // I9: detach from the town-AI FIRST (once) so nothing auto-tasks this NPC,
         // then reproduce the pose via the PLAYER-ORDER path (explicit seat location)
@@ -3376,15 +3985,27 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
     // key translation, so it IS the right one. Abandoning it latches taskBad,
     // which drops the builder back to the position drive - the jitter that
     // reproducing this pose exists to remove.
+    //
+    // A machine or a mine (OPERATE_MACHINERY, 87) is the same case with a smaller
+    // footprint: each engine picks its own work spot around the node, so the
+    // seat limit is too tight for it (host log 2026-11-19 15:16:05: the join's
+    // miner abandoned at 7.4 u).
+    const float taskDriftMax = ((int)out.task == 87) ? TASK_DRIFT_MAX * 4.0f : TASK_DRIFT_MAX;
     if (d.taskApplied && haveActual && (now - d.taskTick) > TASK_GRACE_MS &&
         !engine::isBuildSiteTask((int)out.task) &&
-        dist3(ax, ay, az, out.x, out.y, out.z) > TASK_DRIFT_MAX) {
+        dist3(ax, ay, az, out.x, out.y, out.z) > taskDriftMax) {
         float dd = dist3(ax, ay, az, out.x, out.y, out.z);
         { char b[160]; _snprintf(b, sizeof(b) - 1,
             "[pose] drift-abandon hand=%u,%u drift=%.2f > %.2f",
-            out.hIndex, out.hSerial, dd, (double)TASK_DRIFT_MAX);
+            out.hIndex, out.hSerial, dd, (double)taskDriftMax);
           b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
         d.taskApplied = false; d.taskBad = true;
+        // The order we gave is still the body's goal: left in place, the engine
+        // keeps walking it to the fixture while the park below puts it back on the
+        // owner's spot every frame - the copy shakes on the spot until the owner's
+        // task ends. Drop the goal with the pose.
+        engine::clearGoals(c);
+        engine::haltMovement(c);
     }
     if (d.taskApplied) {
         d.parked = false; // the engine holds the seated/idle pose; don't fight it
@@ -3400,8 +4021,16 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
         // client's machine finished a craft or filled). Only the host sim runs
         // machine work, so an idle copy produces nothing for its owner. Re-arm
         // the order; the next tick re-applies it through the block above.
-        if (engine::isMachineWorkTask((int)out.task) && (now - d.taskTick) > TASK_GRACE_MS) {
-            if (engine::readTaskKey(c) == (int)TASK_NONE) {
+        // Seats too (2026-11-18): a copy committed to a stool/chair that does not
+        // actually hold that action - its seat taken locally, or stood up by its
+        // own AI during a stream gap - stood beside the table for good, since
+        // nothing else re-checks a latched pose.
+        const bool seatPose = seatHoldEnabled() && engine::taskIsSeatPose((int)out.task);
+        if ((engine::isMachineWorkTask((int)out.task) || seatPose) &&
+            (now - d.taskTick) > TASK_GRACE_MS) {
+            const int lk = engine::readTaskKey(c);
+            const bool lapsed = seatPose ? (lk != (int)out.task) : (lk == (int)TASK_NONE);
+            if (lapsed) {
                 unsigned int sh = d.taskLapses < TASK_LAPSE_BACKOFF_MAX
                                       ? d.taskLapses : TASK_LAPSE_BACKOFF_MAX;
                 if (d.taskLapseTick == 0) d.taskLapseTick = now;
@@ -3448,11 +4077,96 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
     // squad it wanders off the spot (observed: standers went ABSENT). endAction
     // under the existing AI-suspend is enough to quiet the march without detaching.
     float gapOut = haveActual ? dist3(ax, ay, az, out.x, out.y, out.z) : 0.0f;
+    // A puppet that just stopped and still trails its owner's stop point glides
+    // the rest of the way instead of being parked there with a teleport (the
+    // "small teleport" when a town walker stops). Once on the spot, park as usual.
+    if (!d.parked && !isSquad && haveActual && npcPuppetMode() > 0 &&
+        d.pupActive && (now - d.pupMs) < 500 && gapOut > 0.5f && gapOut < 40.0f) {
+        puppetPlace(c, d, out, 0.0f, false, false, now, ax, ay, az, 0, 50, true, true);
+        return;
+    }
     if (!d.parked) {
         engine::endAction(c); // stop the residual walk -> idle (not march in place)
         if (engine::park(c, out.x, out.y, out.z, out.heading)) d.parked = true;
+    } else if (haveActual && npcPuppetMode() > 0 && softRestEnabled()) {
+        // Soft hold (2026-11-19: "NPCs and the client's character sometimes
+        // shake"). The hold used to teleport a standing body back the moment it
+        // drifted 1 u - and local physics drifts it constantly: neighbours push
+        // each other apart, the idle clip moves the root - so a crowd re-placed
+        // itself many times a second. Now: correct only past REST_CORR_START,
+        // ease toward the host pose (closing ~3x the gap per second, floor
+        // 10 u/s, a far gap still lands at once), stop inside REST_CORR_STOP,
+        // and fold the standing turn into the same placement.
+        const float REST_CORR_START = 3.0f, REST_CORR_STOP = 0.3f;
+        float yaw = 0.0f;
+        const bool haveYaw = engine::readYaw(c, &yaw);
+        float newYaw = haveYaw ? yaw : out.heading;
+        bool turn = false;
+        if (haveYaw) {
+            float dh = out.heading - yaw;
+            while (dh > 3.14159265f) dh -= 6.2831853f;
+            while (dh < -3.14159265f) dh += 6.2831853f;
+            if (std::fabs(dh) > 0.1745f) {
+                const float STEP = 0.1745f;
+                newYaw = yaw + (dh > STEP ? STEP : (dh < -STEP ? -STEP : dh));
+                turn = true;
+            }
+        }
+        float nx = ax, ny = ay, nz = az;
+        bool move = false;
+        if (gapOut > REST_CORR_START || (d.restCorr && gapOut > REST_CORR_STOP)) {
+            d.restCorr = true;
+            float dtS = (d.restCorrMs != 0 && now - d.restCorrMs < 200)
+                            ? (float)(now - d.restCorrMs) / 1000.0f : 0.016f;
+            float v = gapOut * 3.0f; if (v < 10.0f) v = 10.0f;
+            float step = v * dtS;
+            if (step > gapOut || gapOut > 60.0f) step = gapOut;
+            const float k = step / gapOut;
+            nx = ax + (out.x - ax) * k; ny = ay + (out.y - ay) * k; nz = az + (out.z - az) * k;
+            move = true;
+        } else {
+            d.restCorr = false;
+        }
+        d.restCorrMs = now;
+        if (move || turn) {
+            EntityState pe = out;
+            pe.x = nx; pe.y = ny; pe.z = nz; pe.heading = newYaw;
+            engine::applyRaw(c, pe);
+            if (turn && visualPoseMode() > 0) engine::setVisualPose(c, nx, ny, nz, newYaw);
+        }
     } else if (gapOut > REPARK_DIST) {
         engine::applyRaw(c, out);
+    } else if (haveActual && npcPuppetMode() > 0) {
+        // Standing turn (2026-11-18: "position AND rotation must be the host's").
+        // A held body used to keep whatever facing it stopped with - the host's
+        // idle turns only arrived through drift teleports - so it faced another
+        // way 85-90% of the time. Turn in place toward the host's heading, at
+        // most 10 deg per frame, without moving it.
+        float yaw = 0.0f;
+        if (engine::readYaw(c, &yaw)) {
+            float dh = out.heading - yaw;
+            while (dh > 3.14159265f) dh -= 6.2831853f;
+            while (dh < -3.14159265f) dh += 6.2831853f;
+            if (std::fabs(dh) > 0.1745f) {
+                const float STEP = 0.1745f;
+                EntityState pe = out;
+                pe.x = ax; pe.y = ay; pe.z = az;
+                pe.heading = yaw + (dh > STEP ? STEP : (dh < -STEP ? -STEP : dh));
+                engine::applyRaw(c, pe);
+                if (visualPoseMode() > 0) engine::setVisualPose(c, ax, ay, az, pe.heading);
+                if (poseFidEnabled() && now - d.pupClampLogMs >= 3000) {
+                    d.pupClampLogMs = now;
+                    float after = 0.0f; engine::readYaw(c, &after);
+                    float fx = 0.0f, fz = 0.0f; engine::readFacing(c, &fx, &fz);
+                    char b[224]; _snprintf(b, sizeof(b) - 1,
+                        "[puppet] turn hand=%u,%u yaw=%.3f target=%.3f set=%.3f after=%.3f "
+                        "dir=%.3f,%.3f atan2xz=%.3f",
+                        out.hIndex, out.hSerial, yaw, out.heading, pe.heading, after,
+                        fx, fz, std::atan2(fx, fz));
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+            }
+        }
     }
     // I11: endAction once is not enough for every stander - some RE-ACQUIRE a
     // walk action after settling and march again. Re-quiet only when the body

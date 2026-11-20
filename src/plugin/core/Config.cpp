@@ -233,6 +233,26 @@ void loadConfig(Config& c) {
         if (hm > 20.0) hm = 20.0;
         c.healMult = (float)hm;
     }
+    {
+        // Bed rest: 3x by default in a normal game (the players asked for it),
+        // vanilla under a test scenario so the oracles keep their timings.
+        double bm = std::atof(envOr("KENSHICOOP_BED_HEAL_MULT",
+                                    fileOr(f, "bedHealMult",
+                                           c.scenario.empty() ? "3" : "1").c_str()).c_str());
+        if (!(bm > 0.0)) bm = 1.0;
+        if (bm < 0.1)  bm = 0.1;
+        if (bm > 20.0) bm = 20.0;
+        c.bedHealMult = (float)bm;
+    }
+    c.uiLang = envOr("KENSHICOOP_LANG", fileOr(f, "lang", "auto").c_str());
+    {
+        double sm = std::atof(envOr("KENSHICOOP_SELL_MULT",
+                                    fileOr(f, "sellMult", "1").c_str()).c_str());
+        if (!(sm > 0.0)) sm = 1.0;
+        if (sm < 0.1) sm = 0.1;
+        if (sm > 1.0) sm = 1.0;
+        c.sellMult = (float)sm;
+    }
     c.trackMove = envOr("KENSHICOOP_TRACK_MOVE", "0") == "1";
 
     // Character stats sync (protocol 17): DEFAULT ON - owner-authoritative
@@ -555,9 +575,9 @@ std::string describeConfig(const Config& c) {
               c.cellCollapse ? 1 : 0);
     b[sizeof(b) - 1] = '\0';
     s += b;
-    _snprintf(b, sizeof(b) - 1, " speedPolicy=%s healMult=%.2f",
+    _snprintf(b, sizeof(b) - 1, " speedPolicy=%s healMult=%.2f bedHealMult=%.2f",
               c.speedPolicy == 1 ? "last" : c.speedPolicy == 2 ? "host" : "min",
-              c.healMult);
+              c.healMult, c.bedHealMult);
     b[sizeof(b) - 1] = '\0';
     s += b;
     return s;

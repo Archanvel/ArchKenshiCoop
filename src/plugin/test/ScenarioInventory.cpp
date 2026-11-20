@@ -785,7 +785,7 @@ public:
         return false;
     }
 
-private:
+    // (public: xfer_rapid resolves its two leaders the same way)
     // Resolve the ordinal-th lowest-hand member of the squad TAB with the given rank
     // (the same tab->rank partition the Replicator and the sibling scenarios use).
     static bool resolveRankMember(GameWorld* gw, unsigned int rank, unsigned int ordinal,
@@ -838,6 +838,7 @@ private:
         return -1;
     }
 
+private:
     static const unsigned long HOST_DURATION_MS = 44000; // outlive the join's window
     static const unsigned long JOIN_DURATION_MS = 34000;
     static const unsigned long SEED_MS          = 6000;
@@ -859,6 +860,165 @@ private:
     bool          rankHave_[2];
     unsigned int  rankHand_[2][5];
     unsigned int  selfDst_[5];
+};
+
+// xfer_rapid (2026-11-19 (2) field report: "the join drags items into my inventory
+// and takes them back quickly - they duplicate"). The JOIN drags the way a player
+// does: the item leaves its source ("on the cursor", in neither container) and lands
+// in the destination HOLD_MS later, and the next drag starts before the previous one
+// has been reported. Schedule (join only; the host only seeds and samples):
+//   SEED  @6s   host puts SEED_QTY probe units into its own leader (rank 0)
+//   TAKE  @14s  6 x  rank0 -> rank1, one every 1300 ms, 700 ms on the cursor
+//   GIVE  @26s  4 x  rank1 -> rank0, same rhythm
+//   BURST @36s  3 x  rank0 -> rank1, one every 450 ms, 200 ms on the cursor
+// Every unit is conserved: on BOTH clients the two leaders must end at
+// r0 = base0 - 9 + 4 and r1 = base1 + 9 - 4, where base is the 12 s sample. Before
+// the fix the join gained every unit it dragged while the host gave up about half.
+class XferRapidScenario : public TimedScenario {
+public:
+    XferRapidScenario()
+        : TimedScenario("xfer_rapid", 0), lastLogMs_(0), samples_(0), seedDone_(false),
+          probeType_(0), base0_(-1), base1_(-1), last0_(-1), last1_(-1),
+          step_(0), holding_(false), holdSinceMs_(0), picks_(0), drops_(0), pickMiss_(0) {
+        probeSid_[0] = '\0';
+        for (int r = 0; r < 2; ++r) { rankHave_[r] = false; for (int k = 0; k < 5; ++k) rankHand_[r][k] = 0; }
+    }
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        for (unsigned int r = 0; r < 2; ++r)
+            rankHave_[r] = XferBlockScenario::resolveRankMember(ctx.gw, r, 0, rankHand_[r]);
+        engine::commonTestItemSid(ctx.gw, probeSid_, sizeof(probeSid_), &probeType_);
+        char b[220];
+        _snprintf(b, sizeof(b) - 1,
+            "SCENARIO XFR anchor host=%d r0=%d r1=%d probeSid='%s' probeType=%u",
+            ctx.isHost ? 1 : 0, rankHave_[0] ? 1 : 0, rankHave_[1] ? 1 : 0,
+            probeSid_[0] ? probeSid_ : "(none)", probeType_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (ctx.elapsedMs - lastLogMs_ >= 500 || lastLogMs_ == 0) {
+            lastLogMs_ = ctx.elapsedMs;
+            int probe[2] = { -1, -1 };
+            for (unsigned int rank = 0; rank < 2; ++rank)
+                if (rankHave_[rank]) probe[rank] = countProbe(ctx.gw, rankHand_[rank]);
+            last0_ = probe[0]; last1_ = probe[1];
+            if (base0_ < 0 && ctx.elapsedMs >= BASE_MS) { base0_ = probe[0]; base1_ = probe[1]; }
+            char b[200];
+            _snprintf(b, sizeof(b) - 1,
+                "SCENARIO XFR t=%lu r0=%d r1=%d picks=%d drops=%d",
+                (unsigned long)ctx.elapsedMs, probe[0], probe[1], picks_, drops_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            ++samples_;
+            if (!seedDone_ && ctx.elapsedMs >= SEED_MS) {
+                seedDone_ = true;
+                if (ctx.isHost && rankHave_[0]) {
+                    char sid[48]; sid[0] = '\0';
+                    int got = engine::addTestItemsToContainer(ctx.gw, rankHand_[0], SEED_QTY, sid, sizeof(sid));
+                    char m[200]; _snprintf(m, sizeof(m) - 1, "SCENARIO XFR SEED n=%d sid='%s'",
+                                           got, sid[0] ? sid : "(none)");
+                    m[sizeof(m) - 1] = '\0'; coop::logLine(m);
+                }
+            }
+        }
+
+        // The JOIN's drags run every tick (their timing is the point).
+        if (!ctx.isHost && probeSid_[0] && rankHave_[0] && rankHave_[1]) {
+            if (holding_) {
+                unsigned long hold = (step_ >= TAKES + GIVES) ? BURST_HOLD_MS : HOLD_MS;
+                if (ctx.elapsedMs - holdSinceMs_ >= hold) {
+                    // Drop: the cursor's unit lands in the destination.
+                    const unsigned int* dst = takeStep(step_) ? rankHand_[1] : rankHand_[0];
+                    int added = engine::addItemsToContainerBySid(ctx.gw, dst, probeSid_, probeType_,
+                                                                 1, 0, "", "");
+                    drops_ += added;
+                    holding_ = false;
+                    ++step_;
+                    char m[160]; _snprintf(m, sizeof(m) - 1, "SCENARIO XFR DROP step=%d added=%d t=%lu",
+                                           step_, added, (unsigned long)ctx.elapsedMs);
+                    m[sizeof(m) - 1] = '\0'; coop::logLine(m);
+                }
+            } else if (step_ < TAKES + GIVES + BURST && ctx.elapsedMs >= stepAtMs(step_)) {
+                // Pick: one unit leaves the source and is in neither container.
+                const unsigned int* src = takeStep(step_) ? rankHand_[0] : rankHand_[1];
+                int removed = engine::removeItemsFromContainerBySid(ctx.gw, src, probeSid_,
+                                                                    probeType_, 1);
+                char m[160]; _snprintf(m, sizeof(m) - 1, "SCENARIO XFR PICK step=%d %s removed=%d t=%lu",
+                                       step_, takeStep(step_) ? "take" : "give", removed,
+                                       (unsigned long)ctx.elapsedMs);
+                m[sizeof(m) - 1] = '\0'; coop::logLine(m);
+                if (removed >= 1) { ++picks_; holding_ = true; holdSinceMs_ = ctx.elapsedMs; }
+                else { ++pickMiss_; ++step_; } // nothing to pick (the source copy is empty)
+            }
+        }
+
+        unsigned long dur = ctx.isHost ? HOST_DURATION_MS : JOIN_DURATION_MS;
+        if (ctx.elapsedMs >= dur) {
+            const int net = (TAKES + BURST) - GIVES;
+            bool executed = rankHave_[0] && rankHave_[1] && samples_ > 0 && base0_ >= TAKES &&
+                            base1_ >= 0 &&
+                            (ctx.isHost || (picks_ == TAKES + GIVES + BURST && drops_ == picks_));
+            bool r0Ok = (last0_ == base0_ - net);
+            bool r1Ok = (last1_ == base1_ + net);
+            char m[240];
+            _snprintf(m, sizeof(m) - 1,
+                "SCENARIO XFR verdict host=%d executed=%d r0Ok=%d r1Ok=%d base=%d/%d final=%d/%d "
+                "expect=%d/%d picks=%d drops=%d miss=%d",
+                ctx.isHost ? 1 : 0, executed ? 1 : 0, r0Ok ? 1 : 0, r1Ok ? 1 : 0,
+                base0_, base1_, last0_, last1_, base0_ - net, base1_ + net,
+                picks_, drops_, pickMiss_);
+            m[sizeof(m) - 1] = '\0'; coop::logLine(m);
+            passed_ = executed && r0Ok && r1Ok;
+            return true;
+        }
+        return false;
+    }
+
+private:
+    int countProbe(GameWorld* gw, const unsigned int hand[5]) const {
+        static InvItemEntry items[INV_ITEMS_MAX]; // main thread only
+        unsigned int n = engine::captureContainerContents(gw, hand, items, INV_ITEMS_MAX, 0);
+        int pq = 0;
+        for (unsigned int i = 0; i < n; ++i)
+            if (items[i].itemType == probeType_ && strcmp(items[i].stringID, probeSid_) == 0)
+                pq += (items[i].quantity < 1) ? 1 : (int)items[i].quantity;
+        return pq;
+    }
+    static bool takeStep(int step) { return step < TAKES || step >= TAKES + GIVES; }
+    static unsigned long stepAtMs(int step) {
+        if (step < TAKES) return TAKE_MS + (unsigned long)step * STEP_MS;
+        if (step < TAKES + GIVES) return GIVE_MS + (unsigned long)(step - TAKES) * STEP_MS;
+        return BURST_MS + (unsigned long)(step - TAKES - GIVES) * BURST_STEP_MS;
+    }
+
+    static const unsigned long HOST_DURATION_MS = 62000; // outlive the join's window
+    static const unsigned long JOIN_DURATION_MS = 54000;
+    static const unsigned long SEED_MS          = 6000;
+    static const unsigned long BASE_MS          = 12000;
+    static const unsigned long TAKE_MS          = 14000;
+    static const unsigned long GIVE_MS          = 26000;
+    static const unsigned long BURST_MS         = 36000;
+    static const unsigned long STEP_MS          = 1300;
+    static const unsigned long HOLD_MS          = 700;
+    static const unsigned long BURST_STEP_MS    = 450;
+    static const unsigned long BURST_HOLD_MS    = 200;
+    static const int           SEED_QTY         = 12;
+    static const int           TAKES            = 6;
+    static const int           GIVES            = 4;
+    static const int           BURST            = 3;
+
+    unsigned long lastLogMs_;
+    unsigned int  samples_;
+    bool          seedDone_;
+    char          probeSid_[48];
+    unsigned int  probeType_;
+    int           base0_, base1_, last0_, last1_;
+    int           step_;
+    bool          holding_;
+    unsigned long holdSinceMs_;
+    int           picks_, drops_, pickMiss_;
+    bool          rankHave_[2];
+    unsigned int  rankHand_[2][5];
 };
 
 // inv_equip: EQUIPPED-gear (armour/weapon slot) sync. Each client owns one squad tab
@@ -3054,8 +3214,12 @@ class CorpseLootScenario : public TimedScenario {
 public:
     // race: corpse_loot_race - ONE seeded unit, both sides loot it at the same instant
     // (inside the host's removal-settle window, so the join's copy still shows it).
-    explicit CorpseLootScenario(bool race)
-        : TimedScenario(race ? "corpse_loot_race" : "corpse_loot", 0), race_(race),
+    // extra: corpse_loot_extra (2026-11-19 field log) - the join's engine rolled its own
+    // loot into its copy of the corpse; the join injects EXTRA_QTY local-only units
+    // shortly before its loot and then tries to take more than the host's corpse holds.
+    explicit CorpseLootScenario(bool race, bool extra = false)
+        : TimedScenario(race ? "corpse_loot_race" : (extra ? "corpse_loot_extra" : "corpse_loot"), 0),
+          race_(race), extra_(extra), injected_(false),
           have_(false), haveSubj_(false), haveLeaders_(false),
           haveCorpse_(false), type_(0), killOk_(-1), c0_(-1), seeded_(-1), hostLoot_(-1),
           joinLoot_(-1), lastKillMs_(0), lastLogMs_(0), lastSearchMs_(0), maxCorpse_(-1),
@@ -3122,6 +3286,14 @@ public:
             if (!haveCorpse_ && ctx.elapsedMs >= SEARCH_MS && ctx.elapsedMs - lastSearchMs_ >= 500) {
                 lastSearchMs_ = ctx.elapsedMs;
                 findCorpse(ctx);
+            }
+            if (extra_ && haveCorpse_ && !injected_ && ctx.elapsedMs >= JOIN_LOOT_MS - 5000) {
+                injected_ = true;
+                int got = engine::addItemsToContainerBySid(ctx.gw, corpse_, sid_, type_,
+                                                           EXTRA_QTY, 0, 0, 0);
+                char b[128]; _snprintf(b, sizeof(b) - 1, "CORPSE inject local=%d now=%d",
+                                       got, countIn(ctx, corpse_));
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             }
             if (joinLoot_ < 0 && ctx.elapsedMs >= (race_ ? HOST_LOOT_MS : JOIN_LOOT_MS))
                 joinLoot_ = haveCorpse_ ? loot(ctx, joinL_, "join") : 0;
@@ -3192,7 +3364,9 @@ private:
 
     int loot(const ScenarioContext& ctx, const unsigned int dst[5], const char* who) {
         // suspendVeto=false: exactly the UI drag, subject to the cross-owner veto.
-        int moved = engine::moveItemBetweenContainers(ctx.gw, corpse_, dst, sid_, type_, 1,
+        // extra: grab everything the join's copy shows (the field's "take all").
+        const int want = (extra_ && !ctx.isHost) ? PROBE_QTY + EXTRA_QTY : 1;
+        int moved = engine::moveItemBetweenContainers(ctx.gw, corpse_, dst, sid_, type_, want,
                                                       /*suspendVeto=*/false);
         char b[128]; _snprintf(b, sizeof(b) - 1, "CORPSE loot by=%s moved=%d corpse=%d",
                                who, moved, countIn(ctx, corpse_));
@@ -3215,7 +3389,7 @@ private:
     void logVerdict(const ScenarioContext& ctx, const char* why) {
         // Local mechanics only; the cross-client counts are the oracle's.
         passed_ = ctx.isHost ? (killOk_ == 1 && seeded_ == probeQty() && hostLoot_ == 1)
-                             : (haveCorpse_ && joinLoot_ == 1);
+                             : (haveCorpse_ && (extra_ ? joinLoot_ >= 1 : joinLoot_ == 1));
         char b[320]; _snprintf(b, sizeof(b) - 1,
             "CORPSE verdict role=%s pass=%d why=%s sid='%s' c0=%d seeded=%d hostLoot=%d "
             "joinLoot=%d maxCorpse=%d finalCorpse=%d hostBag0=%d hostBagF=%d joinBag0=%d "
@@ -3230,6 +3404,7 @@ private:
 
     static const char*         PROBE_SID;
     static const int           PROBE_QTY        = 3;
+    static const int           EXTRA_QTY        = 4;
     static const unsigned long KILL_MS          = 8000;
     static const unsigned long SEED_MS          = 12000;
     static const unsigned long SEARCH_MS        = 14000;
@@ -3239,6 +3414,7 @@ private:
     static const unsigned long HOST_DURATION_MS = 56000;
     static const unsigned int  MAX_SQUAD        = 32;
     bool          race_;
+    bool          extra_, injected_;
     bool          have_, haveSubj_, haveLeaders_, haveCorpse_;
     unsigned int  type_;
     int           killOk_, c0_, seeded_, hostLoot_, joinLoot_;
@@ -3253,6 +3429,7 @@ const char* CorpseLootScenario::PROBE_SID = "95781-rebirth.mod";
 
 Scenario* makeInventoryScenario(const std::string& name) {
     if (name == "corpse_loot")      return new CorpseLootScenario(false);
+    if (name == "corpse_loot_extra") return new CorpseLootScenario(false, true);
     // The same corpse looted by both players inside the host's removal-settle window:
     // one unit, so any second copy is a duplicate (the #40 race found by hand).
     if (name == "corpse_loot_race") return new CorpseLootScenario(true);
@@ -3301,6 +3478,7 @@ Scenario* makeInventoryScenario(const std::string& name) {
     if (name == "trade_probe")  return new TradeScenario(/*peer=*/false);
     if (name == "trade_peer")   return new TradeScenario(/*peer=*/true);
     if (name == "xfer_block")   return new XferBlockScenario();
+    if (name == "xfer_rapid")   return new XferRapidScenario();
     if (name == "inv_equip")    return new InventoryEquipScenario(/*reequip=*/false);
     if (name == "inv_reequip")  return new InventoryEquipScenario(/*reequip=*/true);
     if (name == "inv_wpnseq")   return new WeaponSeqScenario();

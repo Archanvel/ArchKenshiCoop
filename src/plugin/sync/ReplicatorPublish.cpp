@@ -182,6 +182,43 @@ void Replicator::xlateSubjects(EntityState* rows, unsigned int from, unsigned in
     }
 }
 
+// Damage numbers (protocol 68): every wound this client's sim applied this tick
+// goes out under the body's wire key; the peer raises the same number over its
+// copy (applyEvents). Runs after publishOwned, so the proxy index is current.
+void Replicator::publishFloaters(NetLink& net, u32 ownerId) {
+    const unsigned int MAXF = 64;
+    Character* who[MAXF]; int val[MAXF];
+    unsigned int n = engine::drainDamageFloaters(who, val, MAXF);
+    for (unsigned int i = 0; i < n; ++i) {
+        Key k;
+        unsigned int h[5];
+        if (!wireKeyOf(who[i], &k)) {
+            if (!engine::readHand(who[i], h)) continue; // char-key layout
+            k.i = h[0]; k.s = h[1]; k.t = h[2]; k.c = h[3]; k.cs = h[4];
+            std::map<Character*, SeenHand>::const_iterator lh = lastHand_.find(who[i]);
+            if (lh != lastHand_.end() && !(lh->second.local < k) && !(k < lh->second.local))
+                k = lh->second.wire;
+        }
+        EventPacket ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.type = (u8)PKT_EVENT; ev.event = (u8)EVT_FLOATER;
+        ev.ownerId = ownerId; ev.eventId = 0; // cosmetic: unnumbered, no dedupe window
+        ev.sType = k.t; ev.sContainer = k.c; ev.sContainerSerial = k.cs;
+        ev.sIndex = k.i; ev.sSerial = k.s;
+        ev.arg = (f32)val[i];
+        net.queueEvent(ev);
+        ++floatersSent_;
+    }
+    const unsigned long now = nowMs();
+    if ((floatersSent_ || floatersShown_ || floatersSkipped_) && now - floaterLogMs_ >= 10000) {
+        floaterLogMs_ = now;
+        char b[128]; _snprintf(b, sizeof(b) - 1,
+            "[floater] sent=%lu shown=%lu skipped=%lu", floatersSent_, floatersShown_,
+            floatersSkipped_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+}
+
 void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
     localId_ = ownerId;   // the drive path reads it; see its refusal guard
     indexProxies();       // wireKeyOf/publishKeyFor read it all pass long
@@ -651,7 +688,17 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
                                       ((was ^ cur) & BODY_DEAD) != 0;
                     const bool held = (coop::bodyIsDown(cur) && !(cur & BODY_DEAD)) ||
                                       coop::bodyIsCarried(cur);
-                    if (!edge && !held) continue;
+                    // Still keepalive (puppet drive, 2026-11-18): a stopped far
+                    // NPC goes out every MID_STILL_MS too, so the join gets its
+                    // final pose and its stream never starves into a release to
+                    // local AI (census park / FREEZE / pop). Outside the quota.
+                    bool still = false;
+                    if (!edge && !held && !(cur & BODY_DEAD) && npcPuppetMode() >= 2) {
+                        unsigned long& ls = midStillMs_[mw];
+                        if (ls == 0 || (nowPub - ls) >= MID_STILL_MS) { ls = nowPub; still = true; }
+                    }
+                    if (!edge && !held && !still) continue;
+                    if (still) { ++n; continue; }
                 }
                 ++n;
                 ++added;
@@ -1305,6 +1352,12 @@ void Replicator::publishNpcCensus(GameWorld* gw, NetLink& net, u32 ownerId) {
             e.k = keyOf(states[i]);
             e.w = wireOf[i];
             e.dist = best;
+            // Membership hysteresis (2026-11-19 join log: 433 MID->PARKED and
+            // 491 PARKED->MID flips - bodies near the budget edge swapped in
+            // and out as everyone shuffled a few units, each flip a park, an
+            // order re-issue and a visible hitch). A body already in the band
+            // ranks as if 25% nearer, so it takes a real move to displace it.
+            e.rank = (midPrev_.count(e.k) != 0) ? best * 0.75f : best;
             midBand_.push_back(e);
         }
         std::sort(midBand_.begin(), midBand_.end());
@@ -1314,9 +1367,14 @@ void Replicator::publishNpcCensus(GameWorld* gw, NetLink& net, u32 ownerId) {
         // smoothness gate on bodies that WERE tracking). The nearest ~48
         // cover everything the join player can meaningfully watch; the far
         // remainder keeps the census-park fallback it always had.
-        const unsigned int MID_BAND_MAX = 48;
+        // 48 was set for walk-ordered bodies (each one a path re-plan and a
+        // running AI); a puppet copy is placed, AI-suspended and plans nothing,
+        // so mode 2 drives twice as many before the census-park tier takes over.
+        const unsigned int MID_BAND_MAX = (npcPuppetMode() >= 2) ? 96 : 48;
         if (midBand_.size() > MID_BAND_MAX) midBand_.resize(MID_BAND_MAX);
         if (midCursor_ >= midBand_.size()) midCursor_ = 0;
+        midPrev_.clear();
+        for (size_t mi = 0; mi < midBand_.size(); ++mi) midPrev_.insert(midBand_[mi].k);
     }
 
     if (auditRows_) notePlatoons(gw, states, n, "host");

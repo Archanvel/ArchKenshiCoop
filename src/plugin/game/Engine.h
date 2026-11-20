@@ -317,6 +317,23 @@ bool suppressNpc(GameWorld* gw, Character* c);
 // leaving a frozen body behind. Also makes the body visible again.
 void restoreNpc(GameWorld* gw, Character* c);
 
+// SEH-guarded scenario diagnostics (ghost_ambush): is the body rendered
+// (RootObject::getVisible), and does a hand resolve to one of THIS client's
+// player-squad members. Both return false when unreadable.
+bool readVisible(Character* c, bool* out);
+// Yaw of the body's orientation in radians (the same value captureOne streams as
+// EntityState::heading). Scenario diagnostics (host_pc_retreat).
+bool readYaw(Character* c, float* out);
+// CharMovement::direction (x, z): the facing the movement layer holds.
+bool readFacing(Character* c, float* fx, float* fz);
+// Character::teleportVisuallyOnly: place the RENDERED body (mesh) at a pose.
+// applyRaw sets the movement layer's position/direction, but a stationary,
+// AI-suspended copy's mesh does not turn to that direction on its own.
+bool setVisualPose(Character* c, float x, float y, float z, float heading);
+// The rendered facing from the skeleton's shoulder line (humanoids only).
+bool readRenderYaw(Character* c, float* yaw);
+bool isPlayerSquadHand(GameWorld* gw, const unsigned int hand[5]);
+
 // True if 'obj' is one of THIS client's player-squad members. Caller holds the
 // SEH frame. Exposed to the sync layer for the recruit membership audit (a
 // re-keyed recruit binds + drives as a proxy but is NOT in the join's squad).
@@ -839,6 +856,9 @@ int removeItemsFromContainerBySid(GameWorld* gw, const unsigned int cHand[5],
 // suspended so it never refuses them. The xfer_block test passes false to drive
 // the engine primitives EXACTLY like a UI drag (subject to the veto), so it can
 // assert a cross-owner move is refused (returns 0, item conserved in src).
+// Count of relocations whose destination refused AND whose source refused the
+// put-back - a stack that ended up nowhere (logged by the transfer channel).
+unsigned long moveLostStacks();
 int moveItemBetweenContainers(GameWorld* gw, const unsigned int srcHand[5],
                               const unsigned int dstHand[5],
                               const char* sid, unsigned int typeCat, int qty,
@@ -1407,8 +1427,16 @@ void         setTaskSelectSpike(bool on);
 // Same pattern as the AI-suspend detour: pointer-compared set, rebuilt each tick
 // on the main thread, hook installed once.
 bool         installDamageGuardHook();
+// Damage-number sharing (protocol 68): detour MedicalSystem::addWound to queue
+// (victim, number) for every wound THIS client's sim applies; drain them each
+// publish; raise the game's own damage label over a body (honours the player's
+// damage-floater option). See EngineInternal.cpp.
+bool         installFloaterShareHook();
+unsigned int drainDamageFloaters(Character** who, int* value, unsigned int max);
+bool         showDamageFloater(Character* c, int value);
 void         clearDamageGuard();
 void         addDamageGuard(Character* c);
+bool         isDamageGuarded(Character* c);
 unsigned int damageGuardCount();
 // Cumulative intercepted / passed-through melee hits since load (the damage_guard
 // oracle's engagement signal: guarded>0 proves local swings really targeted driven
@@ -1434,6 +1462,10 @@ int          installMachineOperateHooks();
 // which local work resumes for an unmirrored machine).
 void         setMachineWorkMirror(bool on);
 void         markMachineMirrored(const unsigned int hand[5], unsigned long ttlMs);
+// Host: hands of the machines a driven body (our copy of a peer's worker)
+// worked within the last ttlMs. Returns the count written.
+unsigned int drivenWorkedMachines(unsigned int (*out)[5], unsigned int maxOut,
+                                  unsigned long ttlMs);
 
 // ---- Join-dealt authoritative damage report (protocol 45) -------------------
 // The damage guard suppresses the join PC's melee on driven NPC copies (cosmetic
@@ -1813,6 +1845,12 @@ bool reviveSubject(GameWorld* gw, const unsigned int subjHand[5]);
 // body cannot immediately re-die. Death only takes hold on the peer via the
 // owner's reliable EVT_DEATH. Returns true if it actually vetoed a local death.
 bool vetoLocalDeath(Character* c, bool keepDown = false);
+// Make a driven copy engine-dead (collapse, blood 0, unconscious + dead) once its
+// owner has reported the death. False if it already was dead here / on fault.
+bool makeCopyDead(Character* c);
+// Stand a driven copy back up and clear its local unconscious flag (the owner has
+// it upright; the copy's own medical model - fed the owner's wounds - kept it out).
+bool forceCopyConscious(Character* c);
 
 // player_combat victim pick: the UPRIGHT non-squad world NPC nearest the body at
 // refHand (excluding, optionally, up to two prior hands - pass 0 for none; the
@@ -1923,7 +1961,18 @@ struct FactionRead {
     int   enemy;      // player's table: isEnemy(them)
     int   enemyRecip; // their table: isEnemy(player)
     int   ally;       // player's table: isAlly(them)
+    // Protocol 69: the membership state behind a dialogue check.
+    bool          stateOk;    // the fields below were read
+    unsigned char allyUs;     // player row: RelationData::alliance
+    unsigned char allyThem;   // their row toward the player
+    int           rankUs;     // player FactionRelations::playerRank
+    int           rankThem;   // their FactionRelations::playerRank
+    unsigned int  nVars;
+    struct Var { unsigned char side; char name[31]; int value; } vars[6];
 };
+// SEH-guarded (protocol 69): write the membership state of one faction row pair
+// (alliance flags, ranks, and the listed state variables). Never removes a variable.
+bool writeFactionStateBySid(GameWorld* gw, const char* sid, const FactionRead& st);
 // SEH-guarded enumeration of every REAL world faction with a readable sid.
 unsigned int listPlayerRelations(GameWorld* gw, FactionRead* out, unsigned int maxOut);
 // SEH-guarded single-row read: both table directions for one faction sid.
@@ -2572,6 +2621,12 @@ void adoptSpeedVote(float mult);
 // main thread once gameplay is live. Returns false when the target does not
 // resolve or the detour fails.
 void setHealMult(float mult);
+// Extra healing factor for a player-squad body lying in a bed (Config::bedHealMult),
+// on top of the engine's own bed bonus and of healMult.
+void setBedHealMult(float mult);
+// Worst leg of a body as a fraction of its full health (1 = sound, <= 0 =
+// wrecked); 1 when unreadable. Diagnostics for the "[limp]" trace.
+float worstLegFrac(Character* c);
 bool installHealHook();
 
 // Spike probe (KENSHICOOP_SPEED_PROBE=1): read the MainBar speed-button
@@ -2615,6 +2670,12 @@ bool chargenConfirmEditor();
 bool chargenExport(Character* c, std::vector<unsigned char>& out);
 // Load .bod2 bytes back and hand them to setAppearanceData; then setName.
 bool chargenApply(Character* c, const std::vector<unsigned char>& bod2, const char* name);
+// True for a human-class body (Character::isHuman). Spawn looks (protocol 68)
+// are shipped for humans only; animals take their size from the INFO age.
+bool chargenIsHuman(Character* c);
+// True when the body's render appearance is settled: not still being created,
+// no appearance/body update pending, loaded. Spawn looks wait for this.
+bool chargenAppearanceIdle(Character* c);
 // ---- end CharCreate ----
 
 } // namespace engine

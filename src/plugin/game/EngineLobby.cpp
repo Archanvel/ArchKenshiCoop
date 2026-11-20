@@ -75,6 +75,117 @@ const char* const SKIN_CARD   = "Kenshi_GenericTextBoxFlat";
 const char* const SKIN_TEXT   = "Kenshi_TextboxStandardText";
 const char* const SKIN_TITLE  = "Kenshi_TextboxPaintedText";
 const char* const SKIN_BUTTON = "Kenshi_Button1";
+
+struct TrPair { const char* en; const char* ru; };
+const TrPair TR_TABLE[] = {
+    { "MULTIPLAYER",
+      "\xD0\x9C\xD0\xA3\xD0\x9B\xD0\xAC\xD0\xA2\xD0\x98\xD0\x9F\xD0\x9B\xD0\x95\xD0\x95\xD0\xA0" },
+    { "PLAYERS",
+      "\xD0\x98\xD0\x93\xD0\xA0\xD0\x9E\xD0\x9A\xD0\x98" },
+    { "LOAD A SAVE - everyone plays in this world",
+      "\xD0\x97\xD0\x90\xD0\x93\xD0\xA0\xD0\xA3\xD0\x97\xD0\x98\xD0\xA2\xD0\xAC" " " "\xD0\xA1\xD0\x9E\xD0\xA5\xD0\xA0\xD0\x90\xD0\x9D\xD0\x95\xD0\x9D\xD0\x98\xD0\x95" " - " "\xD0\xB2\xD1\x81\xD0\xB5" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD0\xB0\xD1\x8E\xD1\x82" " " "\xD0\xB2" " " "\xD1\x8D\xD1\x82\xD0\xBE\xD0\xBC" " " "\xD0\xBC\xD0\xB8\xD1\x80\xD0\xB5" },
+    { "No saves found.",
+      "\xD0\xA1\xD0\xBE\xD1\x85\xD1\x80\xD0\xB0\xD0\xBD\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB9" " " "\xD0\xBD\xD0\xB5" " " "\xD0\xBD\xD0\xB0\xD0\xB9\xD0\xB4\xD0\xB5\xD0\xBD\xD0\xBE" "." },
+    { "LOAD",
+      "\xD0\x97\xD0\x90\xD0\x93\xD0\xA0\xD0\xA3\xD0\x97\xD0\x98\xD0\xA2\xD0\xAC" },
+    { "BACK",
+      "\xD0\x9D\xD0\x90\xD0\x97\xD0\x90\xD0\x94" },
+    { "INVITE FRIENDS",
+      "\xD0\x9F\xD0\xA0\xD0\x98\xD0\x93\xD0\x9B\xD0\x90\xD0\xA1\xD0\x98\xD0\xA2\xD0\xAC" " " "\xD0\x94\xD0\xA0\xD0\xA3\xD0\x97\xD0\x95\xD0\x99" },
+    { "Opening your lobby...",
+      "\xD0\x9E\xD1\x82\xD0\xBA\xD1\x80\xD1\x8B\xD0\xB2\xD0\xB0\xD0\xB5\xD0\xBC" " " "\xD0\xBB\xD0\xBE\xD0\xB1\xD0\xB1\xD0\xB8" "..." },
+    { "No friends online right now.",
+      "\xD0\xA1\xD0\xB5\xD0\xB9\xD1\x87\xD0\xB0\xD1\x81" " " "\xD0\xBD\xD0\xB5\xD1\x82" " " "\xD0\xB4\xD1\x80\xD1\x83\xD0\xB7\xD0\xB5\xD0\xB9" " " "\xD0\xB2" " " "\xD1\x81\xD0\xB5\xD1\x82\xD0\xB8" "." },
+    { "AGAIN",
+      "\xD0\x95\xD0\xA9\xD0\x81" " " "\xD0\xA0\xD0\x90\xD0\x97" },
+    { "INVITE",
+      "\xD0\x9F\xD0\xA0\xD0\x98\xD0\x93\xD0\x9B\xD0\x90\xD0\xA1\xD0\x98\xD0\xA2\xD0\xAC" },
+    { "NEW GAME",
+      "\xD0\x9D\xD0\x9E\xD0\x92\xD0\x90\xD0\xAF" " " "\xD0\x98\xD0\x93\xD0\xA0\xD0\x90" },
+    { "LOAD GAME",
+      "\xD0\x97\xD0\x90\xD0\x93\xD0\xA0\xD0\xA3\xD0\x97\xD0\x98\xD0\xA2\xD0\xAC" },
+    { "WAITING FOR THE HOST",
+      "\xD0\x96\xD0\x94\xD0\x81\xD0\x9C" " " "\xD0\xA5\xD0\x9E\xD0\xA1\xD0\xA2\xD0\x90" },
+    { "DIRECT SESSION",
+      "\xD0\x9F\xD0\xA0\xD0\xAF\xD0\x9C\xD0\x9E\xD0\x95" " " "\xD0\x9F\xD0\x9E\xD0\x94\xD0\x9A\xD0\x9B\xD0\xAE\xD0\xA7\xD0\x95\xD0\x9D\xD0\x98\xD0\x95" },
+    { "Hosting a direct (LAN / Steam ID) session. Start or load a game - connected players join it.",
+      "\xD0\x92\xD1\x8B" " " "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82" " " "\xD0\xBF\xD1\x80\xD1\x8F\xD0\xBC\xD0\xBE\xD0\xB3\xD0\xBE" " " "\xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xB8\xD1\x8F" " (" "\xD0\xBF\xD0\xBE" " IP / Steam ID). " "\xD0\x9D\xD0\xB0\xD1\x87\xD0\xBD\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xB8\xD0\xBB\xD0\xB8" " " "\xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD1\x83" " - " "\xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD1\x91\xD0\xBD\xD0\xBD\xD1\x8B\xD0\xB5" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD0\xB8" " " "\xD0\xBF\xD0\xBE\xD0\xBF\xD0\xB0\xD0\xB4\xD1\x83\xD1\x82" " " "\xD0\xB2" " " "\xD0\xBD\xD0\xB5\xD1\x91" "." },
+    { "Connected to the host - you join their world as soon as it is running.",
+      "\xD0\x9F\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD0\xB5\xD0\xBD\xD0\xBE" " " "\xD0\xBA" " " "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD1\x83" " - " "\xD0\xB2\xD1\x8B" " " "\xD0\xBF\xD0\xBE\xD0\xBF\xD0\xB0\xD0\xB4\xD1\x91\xD1\x82\xD0\xB5" " " "\xD0\xB2" " " "\xD0\xB5\xD0\xB3\xD0\xBE" " " "\xD0\xBC\xD0\xB8\xD1\x80" ", " "\xD0\xBA\xD0\xB0\xD0\xBA" " " "\xD1\x82\xD0\xBE\xD0\xBB\xD1\x8C\xD0\xBA\xD0\xBE" " " "\xD0\xBE\xD0\xBD" " " "\xD0\xB7\xD0\xB0\xD0\xBF\xD1\x83\xD1\x81\xD1\x82\xD0\xB8\xD1\x82" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD1\x83" "." },
+    { "HOST LOBBY",
+      "\xD0\x9B\xD0\x9E\xD0\x91\xD0\x91\xD0\x98" " STEAM" },
+    { "FRIENDS HOSTING",
+      "\xD0\x94\xD0\xA0\xD0\xA3\xD0\x97\xD0\xAC\xD0\xAF" ", " "\xD0\x9A\xD0\x9E\xD0\xA2\xD0\x9E\xD0\xA0\xD0\xAB\xD0\x95" " " "\xD0\xA5\xD0\x9E\xD0\xA1\xD0\xA2\xD0\xAF\xD0\xA2" },
+    { "No friends are hosting right now. Host a game and invite them, or wait for their invite.",
+      "\xD0\xA1\xD0\xB5\xD0\xB9\xD1\x87\xD0\xB0\xD1\x81" " " "\xD0\xBD\xD0\xB8\xD0\xBA\xD1\x82\xD0\xBE" " " "\xD0\xB8\xD0\xB7" " " "\xD0\xB4\xD1\x80\xD1\x83\xD0\xB7\xD0\xB5\xD0\xB9" " " "\xD0\xBD\xD0\xB5" " " "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB8\xD1\x82" ". " "\xD0\xA1\xD0\xBE\xD0\xB7\xD0\xB4\xD0\xB0\xD0\xB9\xD1\x82\xD0\xB5" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD1\x83" " " "\xD0\xB8" " " "\xD0\xBF\xD1\x80\xD0\xB8\xD0\xB3\xD0\xBB\xD0\xB0\xD1\x81\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xB8\xD1\x85" " " "\xD0\xB8\xD0\xBB\xD0\xB8" " " "\xD0\xB4\xD0\xBE\xD0\xB6\xD0\xB4\xD0\xB8\xD1\x82\xD0\xB5\xD1\x81\xD1\x8C" " " "\xD0\xBF\xD1\x80\xD0\xB8\xD0\xB3\xD0\xBB\xD0\xB0\xD1\x88\xD0\xB5\xD0\xBD\xD0\xB8\xD1\x8F" "." },
+    { "Steam is not running - start Steam, or use F2 > Advanced for LAN play.",
+      "Steam " "\xD0\xBD\xD0\xB5" " " "\xD0\xB7\xD0\xB0\xD0\xBF\xD1\x83\xD1\x89\xD0\xB5\xD0\xBD" " - " "\xD0\xB7\xD0\xB0\xD0\xBF\xD1\x83\xD1\x81\xD1\x82\xD0\xB8\xD1\x82\xD0\xB5" " Steam " "\xD0\xB8\xD0\xBB\xD0\xB8" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD0\xB0\xD0\xB9\xD1\x82\xD0\xB5" " " "\xD0\xBF\xD0\xBE" " IP (" "\xD0\xB1\xD0\xBB\xD0\xBE\xD0\xBA" " " "\xD0\xBD\xD0\xB8\xD0\xB6\xD0\xB5" ")." },
+    { "JOIN",
+      "\xD0\x92\xD0\x9E\xD0\x99\xD0\xA2\xD0\x98" },
+    { "HOST GAME",
+      "\xD0\xA1\xD0\x9E\xD0\x97\xD0\x94\xD0\x90\xD0\xA2\xD0\xAC" " " "\xD0\x98\xD0\x93\xD0\xA0\xD0\xA3" },
+    { "LEAVE",
+      "\xD0\x92\xD0\xAB\xD0\x99\xD0\xA2\xD0\x98" },
+    { "CLOSE",
+      "\xD0\x97\xD0\x90\xD0\x9A\xD0\xA0\xD0\xAB\xD0\xA2\xD0\xAC" },
+    { "PLAY BY IP  (no Steam - same network or VPN)",
+      "\xD0\x98\xD0\x93\xD0\xA0\xD0\x90" " " "\xD0\x9F\xD0\x9E" " IP  (" "\xD0\xB1\xD0\xB5\xD0\xB7" " Steam - " "\xD0\xBE\xD0\xB4\xD0\xBD\xD0\xB0" " " "\xD1\x81\xD0\xB5\xD1\x82\xD1\x8C" " " "\xD0\xB8\xD0\xBB\xD0\xB8" " VPN)" },
+    { "Host address:",
+      "\xD0\x90\xD0\xB4\xD1\x80\xD0\xB5\xD1\x81" " " "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB0" ":" },
+    { "HOST BY IP",
+      "\xD0\xA5\xD0\x9E\xD0\xA1\xD0\xA2" " " "\xD0\x9F\xD0\x9E" " IP" },
+    { "Host: press HOST BY IP, then tell your friend this PC's address.",
+      "\xD0\xA5\xD0\xBE\xD1\x81\xD1\x82" ": " "\xD0\xBD\xD0\xB0\xD0\xB6\xD0\xBC\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xA5\xD0\x9E\xD0\xA1\xD0\xA2" " " "\xD0\x9F\xD0\x9E" " IP " "\xD0\xB8" " " "\xD1\x81\xD0\xBE\xD0\xBE\xD0\xB1\xD1\x89\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xB4\xD1\x80\xD1\x83\xD0\xB3\xD1\x83" " " "\xD0\xB0\xD0\xB4\xD1\x80\xD0\xB5\xD1\x81" " " "\xD1\x8D\xD1\x82\xD0\xBE\xD0\xB3\xD0\xBE" " " "\xD0\xBA\xD0\xBE\xD0\xBC\xD0\xBF\xD1\x8C\xD1\x8E\xD1\x82\xD0\xB5\xD1\x80\xD0\xB0" "." },
+    { "Host: press HOST BY IP and tell your friend this address:  ",
+      "\xD0\xA5\xD0\xBE\xD1\x81\xD1\x82" ": " "\xD0\xBD\xD0\xB0\xD0\xB6\xD0\xBC\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xA5\xD0\x9E\xD0\xA1\xD0\xA2" " " "\xD0\x9F\xD0\x9E" " IP " "\xD0\xB8" " " "\xD1\x81\xD0\xBE\xD0\xBE\xD0\xB1\xD1\x89\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xB4\xD1\x80\xD1\x83\xD0\xB3\xD1\x83" " " "\xD1\x8D\xD1\x82\xD0\xBE\xD1\x82" " " "\xD0\xB0\xD0\xB4\xD1\x80\xD0\xB5\xD1\x81" ":  " },
+    { "You are in ",
+      "\xD0\x92\xD1\x8B" " " "\xD0\xB2" " " "\xD0\xBB\xD0\xBE\xD0\xB1\xD0\xB1\xD0\xB8" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD0\xBE\xD0\xBA\xD0\xB0" " " },
+    { "'s lobby. You join their world automatically as soon as they start or load a game.",
+      ". " "\xD0\x92\xD1\x8B" " " "\xD0\xB0\xD0\xB2\xD1\x82\xD0\xBE\xD0\xBC\xD0\xB0\xD1\x82\xD0\xB8\xD1\x87\xD0\xB5\xD1\x81\xD0\xBA\xD0\xB8" " " "\xD0\xBF\xD0\xBE\xD0\xBF\xD0\xB0\xD0\xB4\xD1\x91\xD1\x82\xD0\xB5" " " "\xD0\xB2" " " "\xD0\xB5\xD0\xB3\xD0\xBE" " " "\xD0\xBC\xD0\xB8\xD1\x80" ", " "\xD0\xBA\xD0\xB0\xD0\xBA" " " "\xD1\x82\xD0\xBE\xD0\xBB\xD1\x8C\xD0\xBA\xD0\xBE" " " "\xD0\xBE\xD0\xBD" " " "\xD0\xBD\xD0\xB0\xD1\x87\xD0\xBD\xD1\x91\xD1\x82" " " "\xD0\xB8\xD0\xBB\xD0\xB8" " " "\xD0\xB7\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xB8\xD1\x82" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD1\x83" "." },
+    { "the host",
+      "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB0" },
+    { "hosting KenshiCoop",
+      "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB8\xD1\x82" " KenshiCoop" },
+    { "playing Kenshi",
+      "\xD0\xB8\xD0\xB3\xD1\x80\xD0\xB0\xD0\xB5\xD1\x82" " " "\xD0\xB2" " Kenshi" },
+    { "online",
+      "\xD0\xB2" " " "\xD1\x81\xD0\xB5\xD1\x82\xD0\xB8" },
+    { " - in your lobby",
+      " - " "\xD0\xB2" " " "\xD0\xB2\xD0\xB0\xD1\x88\xD0\xB5\xD0\xBC" " " "\xD0\xBB\xD0\xBE\xD0\xB1\xD0\xB1\xD0\xB8" },
+    { " - invited",
+      " - " "\xD0\xBF\xD1\x80\xD0\xB8\xD0\xB3\xD0\xBB\xD0\xB0\xD1\x88\xD1\x91\xD0\xBD" },
+    { "different mod version - update to the same release",
+      "\xD0\xB4\xD1\x80\xD1\x83\xD0\xB3\xD0\xB0\xD1\x8F" " " "\xD0\xB2\xD0\xB5\xD1\x80\xD1\x81\xD0\xB8\xD1\x8F" " " "\xD0\xBC\xD0\xBE\xD0\xB4\xD0\xB0" " - " "\xD0\xBF\xD0\xBE\xD1\x81\xD1\x82\xD0\xB0\xD0\xB2\xD1\x8C\xD1\x82\xD0\xB5" " " "\xD0\xBE\xD0\xB4\xD0\xB8\xD0\xBD\xD0\xB0\xD0\xBA\xD0\xBE\xD0\xB2\xD1\x83\xD1\x8E" },
+    { "host",
+      "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82" },
+    { "you",
+      "\xD0\xB2\xD1\x8B" },
+    { "host - you",
+      "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82" " - " "\xD0\xB2\xD1\x8B" },
+    { "connected",
+      "\xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD1\x91\xD0\xBD" },
+    { "host - connected",
+      "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82" " - " "\xD0\xBF\xD0\xBE\xD0\xB4\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87\xD1\x91\xD0\xBD" },
+    { "in lobby - waiting for the game",
+      "\xD0\xB2" " " "\xD0\xBB\xD0\xBE\xD0\xB1\xD0\xB1\xD0\xB8" " - " "\xD0\xB6\xD0\xB4\xD1\x91\xD1\x82" " " "\xD0\xBD\xD0\xB0\xD1\x87\xD0\xB0\xD0\xBB\xD0\xB0" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD1\x8B" },
+    { "Host",
+      "\xD0\xA5\xD0\xBE\xD1\x81\xD1\x82" },
+    { "Host a game and invite friends, or join a friend who is hosting.",
+      "\xD0\xA1\xD0\xBE\xD0\xB7\xD0\xB4\xD0\xB0\xD0\xB9\xD1\x82\xD0\xB5" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD1\x83" " " "\xD0\xB8" " " "\xD0\xBF\xD1\x80\xD0\xB8\xD0\xB3\xD0\xBB\xD0\xB0\xD1\x81\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xB4\xD1\x80\xD1\x83\xD0\xB7\xD0\xB5\xD0\xB9" " " "\xD0\xB8\xD0\xBB\xD0\xB8" " " "\xD0\xB2\xD0\xBE\xD0\xB9\xD0\xB4\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xBA" " " "\xD0\xB4\xD1\x80\xD1\x83\xD0\xB3\xD1\x83" ", " "\xD0\xBA\xD0\xBE\xD1\x82\xD0\xBE\xD1\x80\xD1\x8B\xD0\xB9" " " "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB8\xD1\x82" "." },
+    { 0, 0 }
+};
+bool g_lobbyRu = false;
+// Exact-match lookup; anything not in the table (names, Steam's own status
+// lines) is shown as it is. The Russian strings are UTF-8 bytes: they render
+// only when the game runs with its Russian fonts, which is when this is on.
+const char* tr(const char* en) {
+    if (!g_lobbyRu || !en) return en;
+    for (const TrPair* p = TR_TABLE; p->en; ++p)
+        if (strcmp(p->en, en) == 0) return p->ru;
+    return en;
+}
+std::string trs(const std::string& en) { return std::string(tr(en.c_str())); }
+
 const char* const FONT_TITLE  = "Kenshi_PaintedTextFont_Large";
 const char* const FONT_HEAD   = "Kenshi_PaintedTextFont_Medium";
 const char* const FONT_BUTTON = "Kenshi_PaintedTextFont_Small";
@@ -132,8 +243,12 @@ struct LobbyUi {
     unsigned       hash;    // fingerprint of what the content shows
     unsigned       joinedSeen;
     bool           joinRunning; // auto-open edge: a join connection came up
+    MyGUI::EditBox* ipEdit;     // direct-IP address box (0 when not shown)
+    std::string    ipText;      // its text, kept across rebuilds
+    bool           ipSeeded;    // ipText was prefilled from the last session
     LobbyUi() : root(0), bg(0), menuBtn(0), win(0), content(0), open(false),
-                view(VIEW_MAIN), page(0), hash(0), joinedSeen(0), joinRunning(false) {}
+                view(VIEW_MAIN), page(0), hash(0), joinedSeen(0), joinRunning(false),
+                ipEdit(0), ipSeeded(false) {}
 };
 LobbyUi g_ui;
 
@@ -150,8 +265,9 @@ int         g_ngWaitTicks = 0;
 class LobbyUnlinker : public MyGUI::IUnlinkWidget {
 public:
     virtual void _unlinkWidget(MyGUI::Widget* w) {
-        if (w == g_ui.content) { g_ui.content = 0; g_buttons.clear(); }
-        if (w == g_ui.win)     { g_ui.win = 0; g_ui.content = 0; g_buttons.clear(); }
+        if (w == g_ui.ipEdit)  g_ui.ipEdit = 0;
+        if (w == g_ui.content) { g_ui.content = 0; g_ui.ipEdit = 0; g_buttons.clear(); }
+        if (w == g_ui.win)     { g_ui.win = 0; g_ui.content = 0; g_ui.ipEdit = 0; g_buttons.clear(); }
         if (w == g_ui.menuBtn) g_ui.menuBtn = 0;
         if (w == g_ui.bg)      { g_ui.bg = 0; g_ui.win = 0; g_ui.content = 0; g_ui.menuBtn = 0; g_buttons.clear(); }
         if (w == g_ui.root)    g_ui.root = 0;
@@ -260,6 +376,9 @@ struct Model {
     std::string      header, empty;
     std::vector<Row> rows;
     std::vector<Btn> left, right;
+    bool             direct;   // show the play-by-IP block
+    std::string      localIp;
+    Model() : statusCol(0), direct(false) {}
 };
 
 void addBtn(std::vector<Btn>& v, const char* caption, const char* action, bool enabled) {
@@ -268,7 +387,7 @@ void addBtn(std::vector<Btn>& v, const char* caption, const char* action, bool e
 }
 
 const char* friendStateText(int state) {
-    return state == 3 ? "hosting KenshiCoop" : (state == 2 ? "playing Kenshi" : "online");
+    return tr(state == 3 ? "hosting KenshiCoop" : (state == 2 ? "playing Kenshi" : "online"));
 }
 
 void buildModel(const LobbyState* st, const LobbyActions* act, Model& m) {
@@ -285,6 +404,10 @@ void buildModel(const LobbyState* st, const LobbyActions* act, Model& m) {
         r.subCol = strstr(r.sub.c_str(), "host") ? COL_AMBER
                  : strstr(r.sub.c_str(), "connected") ? COL_GREEN
                  : strstr(r.sub.c_str(), "you") ? COL_BEIGE : COL_GREY;
+        if (r.sub.compare(0, 12, "connected - ") == 0)
+            r.sub = trs("connected") + r.sub.substr(9);
+        else r.sub = trs(r.sub);
+        if (r.name == "Host") r.name = trs(r.name);
         m.members.push_back(r);
     }
 
@@ -313,10 +436,10 @@ void buildModel(const LobbyState* st, const LobbyActions* act, Model& m) {
             r.sub    = friendStateText(f.state);
             r.subCol = f.state >= 2 ? COL_GREEN : COL_GREY;
             if (inv == 2) {
-                r.sub += " - in your lobby";
+                r.sub += tr(" - in your lobby");
                 r.subCol = COL_GREEN;
             } else {
-                if (inv == 1) { r.sub += " - invited"; r.subCol = COL_AMBER; }
+                if (inv == 1) { r.sub += tr(" - invited"); r.subCol = COL_AMBER; }
                 r.action  = "invite:" + u64str(f.id);
                 r.caption = inv == 1 ? "AGAIN" : "INVITE";
                 r.enabled = st->lobbyHost;
@@ -327,8 +450,8 @@ void buildModel(const LobbyState* st, const LobbyActions* act, Model& m) {
         addBtn(m.left, "LOAD GAME", "saves", st->lobbyHost);
     } else if (st->inLobby) {
         m.header = "WAITING FOR THE HOST";
-        m.empty  = std::string("You are in ") + esc(st->hostName && st->hostName[0] ? st->hostName : "the host", 28) +
-                   "'s lobby. You join their world automatically as soon as they start or load a game.";
+        m.empty  = std::string(tr("You are in ")) + esc(st->hostName && st->hostName[0] ? st->hostName : tr("the host"), 28) +
+                   tr("'s lobby. You join their world automatically as soon as they start or load a game.");
     } else if (st->running) {
         m.header = "DIRECT SESSION";
         m.empty  = st->isHost
@@ -351,7 +474,7 @@ void buildModel(const LobbyState* st, const LobbyActions* act, Model& m) {
             r.id      = f.id;
             r.pic     = avatarReady(f.id, act);
             r.name    = esc(f.name, 28);
-            r.sub     = f.version < 0 ? "different mod version - update to the same release" : "hosting KenshiCoop";
+            r.sub     = tr(f.version < 0 ? "different mod version - update to the same release" : "hosting KenshiCoop");
             r.subCol  = f.version < 0 ? COL_RED : COL_GREEN;
             r.action  = "join:" + u64str(f.id);
             r.caption = "JOIN";
@@ -359,6 +482,9 @@ void buildModel(const LobbyState* st, const LobbyActions* act, Model& m) {
             m.rows.push_back(r);
         }
         addBtn(m.left, "HOST GAME", "host", st->steamUp);
+        // Play without Steam: one player hosts, the other types the host's address.
+        m.direct  = true;
+        m.localIp = st->localIp ? st->localIp : "";
     }
     if (st->inLobby || st->running) addBtn(m.right, "LEAVE", "leave", true);
     addBtn(m.right, "CLOSE", "close", true);
@@ -381,6 +507,7 @@ unsigned modelHash(const Model& m, int w, int h) {
     _snprintf(b, sizeof(b) - 1, "%d/%d/%d/%d/%d", g_ui.view, g_ui.page, w, h, m.statusCol);
     b[sizeof(b) - 1] = '\0';
     x = fnv(x, b); x = fnv(x, m.status); x = fnv(x, m.header); x = fnv(x, m.empty);
+    x = fnv(x, m.direct ? "D" : "-"); x = fnv(x, m.localIp);
     for (size_t i = 0; i < m.members.size(); ++i) x = fnvRow(x, m.members[i]);
     for (size_t i = 0; i < m.rows.size(); ++i)    x = fnvRow(x, m.rows[i]);
     for (size_t i = 0; i < m.left.size(); ++i)    { x = fnv(x, m.left[i].caption);  x = fnv(x, m.left[i].enabled ? "e" : "d"); }
@@ -396,8 +523,9 @@ MyGUI::TextBox* addText(MyGUI::Widget* parent, int x, int y, int w, int h, const
     if (!t) return 0;
     if (font) t->setFontName(font);
     t->setTextAlign(align);
+    const std::string shown = trs(caption);
     t->setTextColour(colour(col));
-    t->setCaption(MyGUI::UString(caption));
+    t->setCaption(MyGUI::UString(shown));
     t->setNeedMouseFocus(false);
     return t;
 }
@@ -408,7 +536,7 @@ MyGUI::Widget* addButton(MyGUI::Widget* parent, int x, int y, int w, int h, cons
                                                            MyGUI::Align::Default);
     if (!b) return 0;
     b->setFontName(FONT_BUTTON);
-    b->setCaption(MyGUI::UString(caption));
+    b->setCaption(MyGUI::UString(trs(caption)));
     b->setEnabled(enabled);
     b->eventMouseButtonClick += MyGUI::newDelegate(&onActionClick);
     ActionButton ab;
@@ -435,8 +563,10 @@ const int PAD = 14;
 void build(const Model& m) {
     MyGUI::Gui* gui = myGui();
     if (!gui || !g_ui.win) return;
+    if (g_ui.ipEdit) g_ui.ipText = g_ui.ipEdit->getOnlyText().asUTF8(); // typed text survives
     if (g_ui.content) gui->destroyWidget(g_ui.content); // the unlinker clears content + buttons
     g_ui.content = 0;
+    g_ui.ipEdit = 0;
     g_buttons.clear();
 
     const MyGUI::IntCoord cc = g_ui.win->getClientCoord();
@@ -458,7 +588,7 @@ void build(const Model& m) {
 
     // Players: two columns of cards (avatar, name, role).
     char hb[64];
-    _snprintf(hb, sizeof(hb) - 1, "PLAYERS  %d/%d", (int)m.members.size(), (int)MAX_PLAYERS);
+    _snprintf(hb, sizeof(hb) - 1, "%s  %d/%d", tr("PLAYERS"), (int)m.members.size(), (int)MAX_PLAYERS);
     hb[sizeof(hb) - 1] = '\0';
     addText(c, PAD, y, W - 2 * PAD, 26, hb, SKIN_TITLE, FONT_HEAD, COL_BEIGE,
             MyGUI::Align::Left | MyGUI::Align::VCenter);
@@ -482,8 +612,11 @@ void build(const Model& m) {
 
     // Section: header (+ pager), rows or the explanatory text.
     const int bottomY = H - 54;
+    // The play-by-IP block sits between the list and the bottom bar.
+    const int DIRECT_H = 96;
+    const int listBottom = m.direct ? bottomY - DIRECT_H : bottomY;
     const int rowH = 46;
-    int perPage = (bottomY - (y + 32)) / rowH;
+    int perPage = (listBottom - (y + 32)) / rowH;
     if (perPage < 1) perPage = 1;
     const int nRows = (int)m.rows.size();
     const int pages = nRows > 0 ? (nRows + perPage - 1) / perPage : 1;
@@ -503,7 +636,7 @@ void build(const Model& m) {
     if (nRows == 0) {
         // Explanations wrap: a read-only static EditBox (Kenshi's word-wrap skin).
         MyGUI::EditBox* t = c->createWidget<MyGUI::EditBox>("Kenshi_WordWrapEmpty",
-            MyGUI::IntCoord(PAD, y, W - 2 * PAD, bottomY - y - 8), MyGUI::Align::Default);
+            MyGUI::IntCoord(PAD, y, W - 2 * PAD, listBottom - y - 8), MyGUI::Align::Default);
         if (t) {
             t->setEditMultiLine(true);
             t->setEditWordWrap(true);
@@ -511,7 +644,7 @@ void build(const Model& m) {
             t->setEditStatic(true);
             t->setFontName(FONT_TEXT);
             t->setTextColour(colour(COL_GREY));
-            t->setCaption(MyGUI::UString(m.empty));
+            t->setCaption(MyGUI::UString(trs(m.empty)));
             t->setNeedMouseFocus(false);
         }
     }
@@ -531,6 +664,31 @@ void build(const Model& m) {
                 MyGUI::Align::Left | MyGUI::Align::VCenter);
         if (!r.action.empty())
             addButton(c, W - PAD - btnW - 6, ry + 4, btnW, rowH - 14, r.caption, r.action, r.enabled);
+    }
+
+    if (m.direct) {
+        const int dy = listBottom;
+        addText(c, PAD, dy, W - 2 * PAD, 26, "PLAY BY IP  (no Steam - same network or VPN)",
+                SKIN_TITLE, FONT_HEAD, COL_BEIGE, MyGUI::Align::Left | MyGUI::Align::VCenter);
+        const int by = dy + 30, bh = 34, jw = 130, hw = 150;
+        const int ew = W - 2 * PAD - jw - hw - 16 - 120;
+        addText(c, PAD, by, 116, bh, "Host address:", SKIN_TEXT, FONT_TEXT, COL_WHITE,
+                MyGUI::Align::Left | MyGUI::Align::VCenter);
+        MyGUI::EditBox* e = c->createWidget<MyGUI::EditBox>("Kenshi_EditBox",
+            MyGUI::IntCoord(PAD + 120, by, ew > 80 ? ew : 80, bh), MyGUI::Align::Default);
+        if (e) {
+            e->setFontName(FONT_TEXT);
+            e->setMaxTextLength(64);
+            e->setOnlyText(MyGUI::UString(g_ui.ipText));
+            g_ui.ipEdit = e;
+        }
+        addButton(c, W - PAD - hw - 8 - jw, by, jw, bh, "JOIN", "joinip", true);
+        addButton(c, W - PAD - hw, by, hw, bh, "HOST BY IP", "hostip", true);
+        std::string mine = m.localIp.empty()
+            ? std::string(tr("Host: press HOST BY IP, then tell your friend this PC's address."))
+            : std::string(tr("Host: press HOST BY IP and tell your friend this address:  ")) + m.localIp;
+        addText(c, PAD, by + bh + 4, W - 2 * PAD, 22, mine, SKIN_TEXT, FONT_SMALL, COL_GREY,
+                MyGUI::Align::Left | MyGUI::Align::VCenter);
     }
 
     // Bottom bar: context actions left, LEAVE / CLOSE right.
@@ -573,7 +731,7 @@ void ensureMenuButton() {
                 pfx + "KenshiCoopMultiplayerButton");
             if (!b) return;
             b->setFontName(static_cast<MyGUI::TextBox*>(newGame)->getFontName());
-            b->setCaption(MyGUI::UString("MULTIPLAYER"));
+            b->setCaption(MyGUI::UString(tr("MULTIPLAYER")));
             b->eventMouseButtonClick += MyGUI::newDelegate(&onMenuClick);
             btn = b;
         } else {
@@ -650,6 +808,18 @@ void runAction(const std::string& a, const LobbyState* st, const LobbyActions* a
     if (a == "open")      { openWindow("menu button"); return; }
     if (a == "close")     { closeWindow(); return; }
     if (a == "host")      { if (act->host) act->host(); return; }
+    if (a == "hostip")    { if (act->hostDirect) act->hostDirect(); return; }
+    if (a == "joinip") {
+        if (g_ui.ipEdit) g_ui.ipText = g_ui.ipEdit->getOnlyText().asUTF8();
+        // trim spaces: a pasted address often carries one
+        std::string ip = g_ui.ipText;
+        while (!ip.empty() && (ip[0] == ' ' || ip[0] == '\t')) ip.erase(0, 1);
+        while (!ip.empty() && (ip[ip.size() - 1] == ' ' || ip[ip.size() - 1] == '\t')) ip.erase(ip.size() - 1);
+        g_ui.ipText = ip;
+        if (ip.empty()) { lobbyLog("join by IP: no address typed"); return; }
+        if (act->joinDirect) act->joinDirect(ip.c_str());
+        return;
+    }
     if (a == "leave")     { if (act->leave) act->leave(); g_ui.view = VIEW_MAIN; g_ui.page = 0; return; }
     if (a == "newgame")   { openNewGame(st->memberCount); return; }
     if (a == "saves")     { g_ui.view = VIEW_SAVES; g_ui.page = 0; return; }
@@ -775,6 +945,10 @@ void lobbyTick(const LobbyState* st, const LobbyActions* act) {
     if (joinRunning && !g_ui.joinRunning) openWindow("connecting to a host");
     g_ui.joinRunning = joinRunning;
 
+    if (!g_ui.ipSeeded) {
+        g_ui.ipSeeded = true;
+        if (g_ui.ipText.empty() && st->lastIp) g_ui.ipText = st->lastIp;
+    }
     testTick();
     if (!g_pending.empty()) {
         const std::string a = g_pending;
@@ -803,6 +977,8 @@ void lobbyTick(const LobbyState* st, const LobbyActions* act) {
 }
 
 bool lobbyIsOpen() { return g_ui.open; }
+
+void lobbySetRussian(bool on) { g_lobbyRu = on; }
 
 void lobbyTestTick() { testTick(); }
 

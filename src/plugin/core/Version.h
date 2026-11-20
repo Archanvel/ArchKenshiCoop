@@ -6,6 +6,6 @@
 #ifndef KENSHICOOP_VERSION_H
 #define KENSHICOOP_VERSION_H
 
-#define KENSHICOOP_VERSION "0.59.1-fix10" // local build on top of Savas07 v0.59.1 (same protocol)
+#define KENSHICOOP_VERSION "0.59.1-fix21" // local build on top of Savas07 v0.59.1 (protocol 68)
 
 #endif // KENSHICOOP_VERSION_H

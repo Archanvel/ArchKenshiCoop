@@ -200,6 +200,8 @@ public:
     void devSnapshot(GameWorld* gw, std::vector<DevBody>& out);
     float devTimeSlew() const { return timeSlew_; }
     float devSpeed() const { return speedLastSet_; }   // < 0 = no consensus yet
+    // The running game-speed multiplier, never below 1 (paused / unknown = 1).
+    float simMult() const { return (speedLastSet_ > 1.0f) ? speedLastSet_ : 1.0f; }
 
     // Peer-left sweep (carried-body sync): any driven copy still carrying a body
     // after its AUTHOR disconnected gets a local drop, so the carried body is
@@ -249,6 +251,10 @@ public:
     //    (engine::describeCharacter) and replies PKT_SPAWN_INFO (throttled per
     //    hand; found=0 = negative reply, stops the peer's retries).
     void syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId, bool isHost);
+    // Spawn looks (protocol 68): a host appearance for a world-NPC key, carried on
+    // PKT_CHARGEN; applied to the key's proxy/adopted body once bound and settled.
+    void noteNpcLook(const unsigned int hand[5], const std::string& name,
+                     const std::string& raceSid, const std::vector<unsigned char>& bod2);
 
     // Phase 4a: register a container (by hand) this client is AUTHORITATIVE for, so
     // publishInventories streams its contents and applyInventories never reconciles
@@ -273,6 +279,8 @@ public:
     // Also detects per-entity bodyState transitions (KO/death/revive) and queues the
     // matching reliable event on 'net'.
     void publishOwned(GameWorld* gw, NetLink& net, u32 ownerId);
+    // Ship this tick's damage numbers (protocol 68 EVT_FLOATER); after publishOwned.
+    void publishFloaters(NetLink& net, u32 ownerId);
 
     // BEFORE engine: for each owned container, capture its contents and queue a
     // reliable snapshot when the content fingerprint changed (or a periodic safety
@@ -479,6 +487,7 @@ public:
 
     // Shared money-pool sync master enable (KENSHICOOP_MONEY_SYNC).
     void setMoneySync(bool v) { moneySync_ = v; }
+    void setSellMult(float m) { sellMult_ = m; }
 
     // BEFORE engine (protocol 23, both clients; called BEFORE publishOwned so
     // this tick's partition - decideTabs included - already sees the pins):
@@ -949,6 +958,20 @@ public:
     // ghost) - so Test-TravelParity can cross-compare the two worlds while
     // the players travel. Off by default (log volume).
     void setAuditRows(bool on) { auditRows_ = on; }
+    // A short on-screen notice for the local player (shown in the top-left
+    // banner while it is live). 0 when there is none.
+    const char* uiNoticeNow() const; // on the sync layer's own clock
+    void setUiRussian(bool on) { uiRussian_ = on; }
+    // en / ru: the same notice in both languages (ru is UTF-8 bytes).
+    void setUiNotice(const char* en, const char* ru, unsigned long now, unsigned long holdMs) {
+        const char* text = (uiRussian_ && ru) ? ru : en;
+        strncpy(uiNotice_, text, sizeof(uiNotice_) - 1);
+        uiNotice_[sizeof(uiNotice_) - 1] = 0;
+        uiNoticeUntilMs_ = now + holdMs;
+    }
+    // Per-proxy position / drift series (SCENARIO PROXY, [proxy] drift): oracle
+    // input, ~170 lines a second with a town's worth of proxies. Scenario runs only.
+    void setProxyTelemetry(bool on) { proxyTelemetry_ = on; }
 
     // Jail put-to-work desync spike (KENSHICOOP_JAIL_PROBE, read-only): emit
     // correlated [jail] STATE traces for captive bodies - the owned PC in
@@ -1075,10 +1098,43 @@ private:
         unsigned long carryHealTick;  // last self-heal pickup attempt (throttle)
         unsigned long physHealTick;   // last locomotion-body restore attempt (throttle)
         bool          physHealNpc;    // world-NPC copy just left a KO/carry: restore its controller
+        unsigned long runSinceMs;     // combat: owner running away since (0 = not)
+        unsigned long runOffSinceMs;  // combat run-glide: owner stopped running since
+        bool          runActive;      // combat run-glide engaged (pose mirrored per frame)
+        bool          midSeatLogged;  // "[pose] mid-seat hold" logged once
+        // Pose fidelity (KENSHICOOP_POSE_FID): this tick's target + last rendered.
+        Character*    fidC;
+        unsigned long fidMs, fidPrevMs;
+        float         fidX, fidY, fidZ, fidH;
+        float         fidPx, fidPz, fidPtx, fidPtz;
+        bool          fidHavePrev;
+        unsigned long fidRsLogMs;
+        // Puppet glide (KENSHICOOP_NPC_PUPPET): last placed pose (the follower
+        // integrates from it, never from the engine's position).
+        bool          pupActive;
+        bool          pupHave;
+        float         pupX, pupY, pupZ, pupH;
+        unsigned long pupMs;
+        unsigned long pupMoveMs;      // last time the stream showed the body moving
+        unsigned long pupClampLogMs;  // [puppet] clamp log throttle
+        // "[limp]" trace of a wounded world-NPC copy (field report 2026-11-20:
+        // wounded Hive NPCs move in jerks on the join, sound ones do not).
+        unsigned long limpLogMs; unsigned int limpFlips; float limpX, limpZ;
+        unsigned int limpFrames, limpPup, limpRest, limpWalk, limpOther;
+        unsigned long pupYawLogMs;    // [puppet] yawfail log throttle
+        float         pupPrevX, pupPrevZ; // pose placed the frame before (actual speed)
+        unsigned long uprightDownSince;   // owner upright, copy reading down since
+        unsigned int  furnHealMiss;       // consecutive furniture ENTER heals that didn't stick
+        unsigned int  furnExitMiss;       // consecutive furniture EXIT heals that didn't stick
+        bool          restCorr;           // soft rest hold: correcting toward the host pose
+        unsigned long restCorrMs;         // last soft-hold frame (dt)
         unsigned long ragMoveTick;    // last ragdoll re-placement of a down copy (throttle)
         unsigned char ragMoveN;       // re-placements since it last converged (backoff)
         unsigned long getUpHealTick;  // last stale get-up release (throttle)
-        unsigned long poseHealTick;   // last stale seat/work-pose release (throttle)
+        unsigned int  getUpHealMiss;  // consecutive get-up releases the engine re-armed
+        unsigned long bedExitMs;      // last bed fast-exit attempt
+        unsigned int  bedExitTry;     // consecutive bed fast-exits that did not stick
+        unsigned long poseHealTick;  // last stale seat/work-pose release (throttle)
         bool          freeWillHealed; // the pre-drive MOVE_ON_FREE_WILL was ended (once)
         unsigned long glideUntilMs;   // squad glide regime held until (0 = never)
         unsigned long glideFastSinceMs; // source outrunning its gait since (0 = not)
@@ -1149,6 +1205,8 @@ private:
         // showed genuine translation; the walking verdict holds for a fixed
         // time after it so mid-walk velocity dips can't flap the classifier.
         unsigned long moveSeenMs;
+        unsigned long lastMoveTickMs;   // last tick the drive classified the body moving
+        unsigned long carrierLagUntilMs; // squad carrier that cannot keep pace: bleed it up
         // Horizontal unit direction of the last stream translation, so a
         // stepped source's still phase can be walked through along it (the
         // owner-paced lead in applyTargets). haveStepDir = set at least once.
@@ -1215,7 +1273,12 @@ private:
                    combatOverTick(0), combatLockTick(0), npcSnapTick(0),
                    goalsCleared(false),
                    trusted(false), agreeStreak(0),
-                   carryHealTick(0), physHealTick(0), physHealNpc(false), ragMoveTick(0), ragMoveN(0), getUpHealTick(0), poseHealTick(0),
+                   carryHealTick(0), physHealTick(0), physHealNpc(false), runSinceMs(0), runOffSinceMs(0), runActive(false), midSeatLogged(false),
+                   fidC(0), fidMs(0), fidPrevMs(0), fidX(0), fidY(0), fidZ(0), fidH(0),
+                   fidPx(0), fidPz(0), fidPtx(0), fidPtz(0), fidHavePrev(false), fidRsLogMs(0),
+                   pupActive(false), pupHave(false), pupX(0), pupY(0), pupZ(0), pupH(0),
+                   pupMs(0), pupMoveMs(0), pupClampLogMs(0), limpLogMs(0), limpFlips(0), limpX(0), limpZ(0), limpFrames(0), limpPup(0), limpRest(0), limpWalk(0), limpOther(0), pupYawLogMs(0), pupPrevX(0), pupPrevZ(0), uprightDownSince(0), furnHealMiss(0), furnExitMiss(0), restCorr(false), restCorrMs(0),
+                   ragMoveTick(0), ragMoveN(0), getUpHealTick(0), getUpHealMiss(0), bedExitMs(0), bedExitTry(0), poseHealTick(0),
                    freeWillHealed(false),
                    glideUntilMs(0), glideFastSinceMs(0), glideStallX(0), glideStallZ(0),
                    glideStallSinceMs(0), glideLagSinceMs(0), glideLagTickMs(0),
@@ -1227,7 +1290,7 @@ private:
                    furnCageHoldTick(0),
                    haveChainOwner(false), furnHandKind(0), chainHealTick(0),
                    sneakTick(0), proneTick(0), crawlDrive(false),
-                   velPeak(0.0f), moveSeenMs(0), stepDirX(0.0f), stepDirZ(0.0f),
+                   velPeak(0.0f), moveSeenMs(0), lastMoveTickMs(0), carrierLagUntilMs(0), stepDirX(0.0f), stepDirZ(0.0f),
                    haveStepDir(false), dbgStillF(0), wasMoving(false),
                    restEnterMs(0), walkBranchPrev(false),
                    zeroF(0), activeF(0), advMs(0),
@@ -1497,9 +1560,11 @@ private:
         Key k;   // LOCAL hand: what captureNpcByHand resolves
         Key w;   // wire key (publishKeyFor): what the row is published under
         float dist;
-        bool operator<(const MidBandEntry& o) const { return dist < o.dist; }
+        float rank;  // sort key: dist, discounted for last rebuild's members
+        bool operator<(const MidBandEntry& o) const { return rank < o.rank; }
     };
     std::vector<MidBandEntry> midBand_;
+    std::set<Key>             midPrev_;    // members after the previous rebuild (hysteresis)
     unsigned int              midCursor_;  // start of the CURRENT slice
     unsigned long             midSliceMs_; // last slice advance (50 ms cadence:
                                            // the slice must persist across a
@@ -1517,6 +1582,12 @@ private:
     // MERGED census positions (every sender's latest rows; the lowest owner id
     // wins a hand two senders both list). Rebuilt by rebuildCensusUnion.
     std::map<Key, CensusPos>  censusPos_;     // census author's pos per row
+    // Census glide (puppet mode 2): per-key last glide frame.
+    struct CensusGlide { unsigned long ms; CensusGlide() : ms(0) {} };
+    std::map<Key, CensusGlide> censusGlide_;
+    unsigned long              censusGlideFrames_;
+    float censusGlideStep(Character* c, const EntityState& st, const Key& k,
+                          const CensusPos& cp, float d, unsigned long nowP);
     std::map<Key, CensusPos>  proxyDriftPrev_; // join: census pos at the last [proxy]
                                               //   drift sweep (owner-motion estimate)
     float                     censusParkDist_;
@@ -1578,6 +1649,7 @@ private:
     bool                      censusFreezeAi_;
     std::map<Key, unsigned long> censusFrozen_; // join: per-key freeze-hold tick
     std::map<Key, unsigned long> proxyOrphanMs_; // join: proxy unlisted + unstreamed since
+    std::map<Key, unsigned long> proxyOrphanSeenMs_; // ...and when that was last confirmed
     // Attention gate (KENSHICOOP_ATTENTION_RADIUS). Reconciliation follows
     // attention: a body no interest anchor is within attentionRadius_ of is
     // DORMANT, and neither side speaks for it - the host omits it from the
@@ -1715,6 +1787,10 @@ private:
     unsigned int              attnVetoRawN_;
     unsigned int              attnVetoMask_;   // bit a = raw anchor a survived
     bool                      auditRows_;     // travel_parity worldstate rows
+    char                      uiNotice_[192];
+    bool                      uiRussian_;
+    unsigned long             uiNoticeUntilMs_;
+    bool                      proxyTelemetry_; // scenario-only proxy series
     bool                      jailProbe_;     // KENSHICOOP_JAIL_PROBE [jail] STATE
     bool                      jailObserve_;   // KENSHICOOP_JAIL_OBSERVE [jail] OBSERVE
     // Per-captive last-logged sample for the jail-observe spike (kind + pos +
@@ -1802,7 +1878,8 @@ private:
     // snapshot's container, 0 = none. Survives newer snapshots; see applyInventories.
     struct InvRecv { u32 ownerId; std::vector<InvItemEntry> items; bool dirty; bool truncated;
                      bool shop; bool corpse; unsigned long recvMs; unsigned char bench;
-                     unsigned long bagShortMs; };
+                     unsigned long bagShortMs;
+                     unsigned long reapplyMs; }; // corpse: last periodic re-reconcile
     std::set<Key>          ownedContainers_;
     std::map<Key, InvPub>  invPub_;
     std::map<Key, InvRecv> invRecv_;
@@ -1856,7 +1933,11 @@ private:
         std::map<std::string, InvItemEntry> lines;  // line key -> entry, quantity = count
         int                                 money;  // absolute, -1 unknown
         bool                                applied; // this side's shop holds it
-        TradeTable() : money(-1), applied(true) {}
+        // Protocol 70: `lines` is the host's WHOLE stock (it traded there), so
+        // a line that is not in it does not exist. Each side builds a merchant's
+        // stock on its own; without this the two players saw different goods.
+        bool                                full;
+        TradeTable() : money(-1), applied(true), full(false) {}
     };
     std::map<Key, u32>        tradeHolder_;     // merchant -> lock holder
     std::map<Key, TradeTable> tradeTable_;      // merchant -> touched lines + money
@@ -1946,6 +2027,10 @@ private:
     std::vector<RecentDrop>    pendingDrops_;
     std::vector<RecentDrop>    dormantDrops_;
     std::vector<RecentDrop>    severedDrops_;
+    // Every non-gear ground drop this client's engine performed, kept ~10 s: the
+    // transfer detector reads it to tell 'dragged out of a PEER's container onto
+    // the ground' from a plain desync of that container.
+    std::vector<RecentDrop>    peerDropHints_;
     // Host: remember that `body` just lost a limb whose severed item the engine grounded.
     void noteSeveredLimbAt(Character* body);
     // Record one (bounded: the oldest record goes first) / consume the first record
@@ -2090,7 +2175,12 @@ private:
     //   the W2 weapon census as a ground drop / pickup of that sid on those characters.
     typedef std::pair<std::string, u32> XKey; // (stringID, itemType)
     struct XferPend  { int delta; unsigned long sinceMs; };
-    struct XferLatch { int delta; unsigned long deadlineMs; };
+    // delta: units of intents nobody has answered yet. ackedDelta: units the
+    // container's owner ACCEPTED at ackedMs - still defended against a snapshot
+    // that was received before the verdict (stale by construction), dropped by
+    // the first one received after it.
+    struct XferLatch { int delta; unsigned long deadlineMs; int ackedDelta; unsigned long ackedMs;
+                       XferLatch() : delta(0), deadlineMs(0), ackedDelta(0), ackedMs(0) {} };
     std::map<Key, std::map<XKey, int> >       xferBase_;
     std::map<Key, bool>                       xferSeeded_;
     std::map<Key, std::map<XKey, XferPend> >  xferPend_;
@@ -2122,11 +2212,30 @@ private:
         u32           dstAcker;
         bool          srcSettled; // that end's owner has answered
         bool          dstSettled;
+        // Provenance of the moved stack, so refused units can be handed BACK to
+        // our own source (a give into a peer's container it could not take).
+        int           quality;
+        unsigned char level;
+        char          manufacturer[48];
+        char          material[48];
     };
     std::map<u32, XferOut>                    xferOut_;
+    // True while the transfer detector holds an unsettled diff for k or for any
+    // container we author (corpse re-reconcile waits for it).
+    bool xferPendingAnywhere(const Key& k) const;
     // Undo one intent's contribution to a peer end's reconcile-suppression
     // latch (protocol 50). See the definition for why every verdict does this.
     void releaseXferLatch(const Key& k, const XKey& key, int delta);
+    // The owner's verdict for one intent's end: `unacked` undoes the intent's
+    // contribution, `accepted` (same sign as the contribution) stays defended
+    // until a snapshot received after `now` arrives.
+    void ackXferLatch(const Key& k, const XKey& key, int unacked, int accepted,
+                      unsigned long now);
+    // Units of one item key in a tracked container right now (0 if unresolved).
+    int  xferKeyTotal(GameWorld* gw, const Key& k, const XKey& key);
+    // Move ONE key of a container's detector baseline by d units (a mutation we
+    // made ourselves), leaving every other pending diff of that container alone.
+    void xferBaseShift(const Key& k, const XKey& key, int d);
     std::map<std::pair<Key, std::string>, unsigned long> wdSuppress_;
     unsigned long                             xferScanMs_; // last detector scan
     // Recapture `k`'s container and overwrite its baseline (clears its pends): call
@@ -2262,6 +2371,48 @@ private:
     // (snap) from smooth convergence (softWalk) and names WHY (wrongTgt).
     unsigned long combatSnapTotal_; // combat hard teleports (applyRaw) - the visible warp
     unsigned long combatSoftWalk_;  // combat soft walk-converge corrections (no teleport)
+    unsigned long combatRunFrames_; // combat run-glide frames (owner running away)
+    unsigned long floatersSent_;    // damage numbers shipped (protocol 68)
+    unsigned long floatersShown_;   // peer damage numbers raised over our copies
+    unsigned long floatersSkipped_; // peer numbers for bodies we wound ourselves / unresolved
+    unsigned long floaterLogMs_;
+    // Pose fidelity accumulators (KENSHICOOP_POSE_FID), per regime group.
+    struct PoseFidAcc {
+        unsigned long n, jumps, bodyMs;
+        unsigned long e[7], y[5], r[5];
+        PoseFidAcc() : n(0), jumps(0), bodyMs(0) {
+            for (int i = 0; i < 7; ++i) e[i] = 0;
+            for (int i = 0; i < 5; ++i) { y[i] = 0; r[i] = 0; }
+        }
+    };
+    PoseFidAcc    poseFid_[6];
+    // Host: last keepalive send of a STOPPED mid-band NPC (puppet mode 2).
+    std::map<Key, unsigned long> midStillMs_;
+    static const unsigned long MID_STILL_MS = 1500;
+    unsigned long poseFidLogMs_;
+    static bool   poseFidEnabled();
+    void          poseFidelityPass(GameWorld* gw, unsigned long now);
+    void          puppetPlace(Character* c, Driven& d, const EntityState& out, float vlen,
+                              bool teleportEdge, bool midTier, unsigned long now,
+                              float ax, float ay, float az, int interpMode,
+                              unsigned long segMs, bool mirror, bool turnLimit);
+    unsigned long puppetFrames_, puppetTps_, puppetClamps_, puppetEnters_, combatPuppetFrames_,
+                  carrierPuppetFrames_;
+    // Spawn looks (protocol 68). Host: flattened PKT_CHARGEN per answered key.
+    // Join: looks waiting for their key's binding to settle.
+    struct PendingLook {
+        std::string name, raceSid;
+        std::vector<unsigned char> bod2;
+        unsigned long recvMs, boundMs;
+        Character* body; // compared, never dereferenced here
+        PendingLook() : recvMs(0), boundMs(0), body(0) {}
+    };
+    std::map<Key, std::vector<u8> > lookCache_;
+    std::map<Key, PendingLook>       pendingLooks_;
+    unsigned long                    lookApplyMs_;
+    static bool spawnLookEnabled();
+    void queueNpcLook(NetLink& net, u32 ownerId, const Key& k, Character* c);
+    void applyPendingLooks(GameWorld* gw);
     unsigned long combatSlide_;     // combat FAST-SLIDE corrections: drift past the old snap
                                     //   band (COMBAT_SNAP_DIST) converged with a quick walk
                                     //   instead of a teleport (the smoothness-pass win - these
@@ -2496,6 +2647,7 @@ private:
     // join's own received ack on a join).
     std::map<u32, u32> poolAckedBy_;
     bool moneySync_;
+    float sellMult_; // share of a merchant sale kept (1 = vanilla)
     // Protocol 24 faction-relation sync state, per faction sid.
     // known      = our current baseline (seeded on first sight, updated on every
     //              local change we sent and every received row we applied - the
@@ -2506,7 +2658,8 @@ private:
     struct FacRow {
         float known; float lastSendVal; unsigned long lastSendMs;
         sync::SenderSeq seqSeen; bool seeded;
-        FacRow() : known(0), lastSendVal(0), lastSendMs(0), seeded(false) {}
+        u32 stateHash; // protocol 69: fingerprint of the membership state last seen/sent
+        FacRow() : known(0), lastSendVal(0), lastSendMs(0), seeded(false), stateHash(0) {}
     };
     std::map<std::string, FacRow> facRows_;
     u32           facSeqOut_;
@@ -2519,8 +2672,11 @@ private:
     struct DoorRow {
         int knownOpen; int knownLocked; unsigned long lastSendMs;
         sync::SenderSeq seqSeen; bool seeded;
+        // A row received while the door was not loaded here: written the first
+        // time the door is sampled, instead of being lost.
+        bool want; int wantOpen; int wantLocked;
         DoorRow() : knownOpen(-1), knownLocked(-1), lastSendMs(0),
-                    seeded(false) {}
+                    seeded(false), want(false), wantOpen(-1), wantLocked(-1) {}
     };
     std::map<Key, DoorRow> doorRows_;
     u32           doorSeqOut_;
