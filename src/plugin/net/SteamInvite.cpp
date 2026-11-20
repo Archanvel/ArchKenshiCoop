@@ -4,6 +4,7 @@
 #include "SteamP2P.h"        // selfId() + accept() (shared Steam client)
 #include "../CoopLog.h"
 #include "../../netproto/Wire.h" // coop::PROTOCOL_VERSION (lobby-data version gate)
+#include "../core/Version.h"     // KENSHICOOP_VERSION (shown in the public game list)
 
 #include <windows.h>
 #include <cstdio>
@@ -49,6 +50,8 @@ const int k_iSteamNetworkingCallbacks  = 1200;
 const int cb_LobbyCreated           = k_iSteamMatchmakingCallbacks + 13; // 513
 const int cb_LobbyEnter             = k_iSteamMatchmakingCallbacks + 4;  // 504
 const int cb_GameLobbyJoinRequested = k_iSteamMatchmakingCallbacks + 33; // 533
+const int cb_LobbyChatMsg           = k_iSteamMatchmakingCallbacks + 7;  // 507
+const int cb_LobbyMatchList         = k_iSteamMatchmakingCallbacks + 10; // 510
 const int k_iSteamFriendsCallbacks  = 300;
 // "Join Game" on a friend whose rich presence has a "connect" string, while our
 // game is running (cold launches get it on the command line instead).
@@ -67,10 +70,21 @@ struct LobbyEnter_t {
     unsigned char      m_bLocked;
     unsigned int       m_EChatRoomEnterResponse;
 };
+struct LobbyMatchList_t { unsigned int m_nLobbiesMatching; };
+struct LobbyChatMsg_t {
+    unsigned long long m_ulSteamIDLobby;
+    unsigned long long m_ulSteamIDUser;
+    unsigned char      m_eChatEntryType;
+    unsigned int       m_iChatID;
+};
 #pragma pack(pop)
 
 const int      k_EResultOK                        = 1;
 const int      k_ELobbyTypeFriendsOnly            = 1;
+const int      k_ELobbyTypePublic                 = 2;
+const int      k_ELobbyComparisonEqual            = 0;
+const int      k_ELobbyDistanceFilterWorldwide    = 3;
+const int      k_EChatEntryTypeChatMsg            = 1;
 const unsigned k_EChatRoomEnterResponseSuccess    = 1;
 const int      k_EFriendFlagImmediate             = 0x04;
 
@@ -89,6 +103,17 @@ typedef bool  (*MmRequestLobbyDataFn)(void* mm, unsigned long long lobby);
 typedef unsigned long long (*MmGetLobbyOwnerFn)(void* mm, unsigned long long lobby);
 typedef int   (*MmGetNumMembersFn)(void* mm, unsigned long long lobby);
 typedef unsigned long long (*MmGetMemberByIndexFn)(void* mm, unsigned long long lobby, int i);
+// Public game list + lobby chat (all optional: without them the lobby stays
+// friends-only and silent, exactly as before).
+typedef void  (*MmAddStrFilterFn)(void* mm, const char* key, const char* value, int cmp);
+typedef void  (*MmAddDistFilterFn)(void* mm, int filter);
+typedef SteamAPICall_t (*MmRequestListFn)(void* mm);
+typedef unsigned long long (*MmLobbyByIndexFn)(void* mm, int i);
+typedef int   (*MmMemberLimitFn)(void* mm, unsigned long long lobby);
+typedef bool  (*MmSetTypeFn)(void* mm, unsigned long long lobby, int type);
+typedef bool  (*MmSendChatFn)(void* mm, unsigned long long lobby, const void* body, int cb);
+typedef int   (*MmGetChatFn)(void* mm, unsigned long long lobby, int chatId,
+                             unsigned long long* user, void* data, int cap, int* type);
 typedef int   (*FrGetCountFn)(void* friends, int eFriendFlags);
 typedef unsigned long long (*FrGetByIndexFn)(void* friends, int i, int eFriendFlags);
 typedef const char* (*FrGetNameFn)(void* friends, unsigned long long id);
@@ -133,6 +158,14 @@ MmRequestLobbyDataFn  g_reqData     = 0;
 MmGetLobbyOwnerFn     g_getOwner    = 0;
 MmGetNumMembersFn     g_getNum      = 0;
 MmGetMemberByIndexFn  g_getMember   = 0;
+MmAddStrFilterFn      g_addStrFilter  = 0;
+MmAddDistFilterFn     g_addDistFilter = 0;
+MmRequestListFn       g_requestList   = 0;
+MmLobbyByIndexFn      g_lobbyByIndex  = 0;
+MmMemberLimitFn       g_memberLimit   = 0;
+MmSetTypeFn           g_setType       = 0;
+MmSendChatFn          g_sendChat      = 0;
+MmGetChatFn           g_getChat       = 0;
 FrGetCountFn          g_frCount     = 0;
 FrGetByIndexFn        g_frByIndex   = 0;
 FrGetNameFn           g_frName      = 0;
@@ -195,6 +228,46 @@ int                g_invitedN     = 0;
 // Bumped on every successful lobby entry as the joining player.
 unsigned           g_joinedSerial = 0;
 
+// ---- Public games (2026-11-20) -------------------------------------------------
+// A host may open its lobby to everyone; anyone running the same build finds it
+// in the MULTIPLAYER window without being a Steam friend. Steam's own lobby
+// list does the matchmaking - there is no server of ours.
+bool               g_wantPublic   = false; // host's choice (kept across lobbies)
+int                g_typePublished = -1;   // lobby type last applied (-1 = none)
+bool               g_browse       = false; // window open and not in a lobby
+bool               g_listInFlight = false;
+unsigned int       g_lastListMs   = 0;
+struct PublicRow {
+    unsigned long long lobby, owner;
+    char               name[64];
+    char               ver[32];
+    int                version;  // 1 same protocol, -1 different, 0 unknown
+    int                members, limit;
+    bool               ready;    // host's world is running
+};
+const int          MAX_PUBLIC = 48;
+PublicRow          g_public[MAX_PUBLIC];
+int                g_publicN = 0;
+
+// ---- Lobby chat ----------------------------------------------------------------
+struct ChatLine { char text[320]; };
+const int          MAX_CHAT = 40;
+ChatLine           g_chat[MAX_CHAT];
+int                g_chatN = 0;
+unsigned           g_chatSerial = 0;
+void chatPush(const char* who, const char* text) {
+    if (g_chatN == MAX_CHAT) {
+        for (int i = 1; i < MAX_CHAT; ++i) g_chat[i - 1] = g_chat[i];
+        --g_chatN;
+    }
+    _snprintf(g_chat[g_chatN].text, sizeof(g_chat[g_chatN].text) - 1, "%s: %s",
+              who ? who : "?", text ? text : "");
+    g_chat[g_chatN].text[sizeof(g_chat[g_chatN].text) - 1] = '\0';
+    ++g_chatN;
+    ++g_chatSerial;
+}
+void chatClear() { g_chatN = 0; ++g_chatSerial; }
+
 void noteInvited(unsigned long long id) {
     for (int i = 0; i < g_invitedN; ++i) if (g_invited[i] == id) return;
     if (g_invitedN < MAX_INVITED) g_invited[g_invitedN++] = id;
@@ -227,6 +300,8 @@ SteamCallback g_cbLobbyEnter;
 SteamCallback g_cbJoinRequested;
 SteamCallback g_cbRichJoin;
 SteamCallback g_cbP2PRequest;
+SteamCallback g_cbMatchList;
+SteamCallback g_cbChatMsg;
 
 void steamLog(const char* msg) {
     char b[256];
@@ -389,6 +464,7 @@ void enterLobby(unsigned long long lobby) {
     g_joinOwner = 0;
     g_joinWaitLogged = false;
     g_invitedN = 0;
+    chatClear();
     g_joinLobby(g_mm, lobby);
 }
 
@@ -413,7 +489,17 @@ void onLobbyCreated(LobbyCreated_t* r, bool ioFailure) {
     if (g_setData) {
         g_setData(g_mm, g_lobby, "kc_protocol", pv);
         g_setData(g_mm, g_lobby, "kc_game", "KenshiCoop");
+        // What the public game list shows about this lobby.
+        char ob[32];
+        _snprintf(ob, sizeof(ob) - 1, "%llu", (unsigned long long)coop::steamp2p::selfId());
+        ob[sizeof(ob) - 1] = '\0';
+        g_setData(g_mm, g_lobby, "kc_owner", ob);
+        g_setData(g_mm, g_lobby, "kc_ver", KENSHICOOP_VERSION);
+        const char* me = g_frSelfName ? g_frSelfName(g_friends) : 0;
+        g_setData(g_mm, g_lobby, "kc_name", (me && me[0]) ? me : "?");
     }
+    g_typePublished = -1; // tick() applies the host's public / friends-only choice
+    chatClear();
     char b[96];
     _snprintf(b, sizeof(b) - 1, "lobby created %llu (protocol %s)", g_lobby, pv);
     b[sizeof(b) - 1] = '\0';
@@ -531,8 +617,77 @@ void onP2PSessionRequest(P2PSessionRequest_t* r) {
     coop::steamp2p::accept(r->m_steamIDRemote);
 }
 
+// The public game list arrived: copy what the window shows. Lobby data of the
+// listed lobbies comes with the list, so no per-lobby request is needed.
+void onLobbyMatchList(LobbyMatchList_t* r, bool ioFailure) {
+    g_listInFlight = false;
+    g_publicN = 0;
+    if (ioFailure || !r || !g_lobbyByIndex || !g_getData) return;
+    static unsigned s_lastN = ~0u;
+    if (r->m_nLobbiesMatching != s_lastN) {
+        s_lastN = r->m_nLobbiesMatching;
+        char b[96];
+        _snprintf(b, sizeof(b) - 1, "public game list: %u lobby(ies)", r->m_nLobbiesMatching);
+        b[sizeof(b) - 1] = '\0';
+        steamLog(b);
+    }
+    for (unsigned i = 0; i < r->m_nLobbiesMatching && g_publicN < MAX_PUBLIC; ++i) {
+        const unsigned long long lobby = g_lobbyByIndex(g_mm, (int)i);
+        if (lobby == 0 || lobby == g_lobby) continue;
+        PublicRow& p = g_public[g_publicN];
+        std::memset(&p, 0, sizeof(p));
+        p.lobby = lobby;
+        const char* v = g_getData(g_mm, lobby, "kc_owner");
+        p.owner = (v && v[0]) ? _strtoui64(v, 0, 10) : 0;
+        v = g_getData(g_mm, lobby, "kc_name");
+        _snprintf(p.name, sizeof(p.name) - 1, "%s", (v && v[0]) ? v : "?");
+        v = g_getData(g_mm, lobby, "kc_ver");
+        _snprintf(p.ver, sizeof(p.ver) - 1, "%s", (v && v[0]) ? v : "?");
+        v = g_getData(g_mm, lobby, "kc_protocol");
+        p.version = (v && v[0]) ? (((unsigned)atoi(v) == (unsigned)coop::PROTOCOL_VERSION) ? 1 : -1) : 0;
+        v = g_getData(g_mm, lobby, "kc_ready");
+        p.ready = v && v[0] == '1';
+        p.members = g_getNum ? g_getNum(g_mm, lobby) : 0;
+        p.limit   = g_memberLimit ? g_memberLimit(g_mm, lobby) : (int)MAX_PLAYERS;
+        ++g_publicN;
+    }
+}
+
+void requestPublicList() {
+    if (g_listInFlight || !g_requestList || !g_lobbyByIndex) return;
+    if (g_addStrFilter)  g_addStrFilter(g_mm, "kc_game", "KenshiCoop", k_ELobbyComparisonEqual);
+    if (g_addDistFilter) g_addDistFilter(g_mm, k_ELobbyDistanceFilterWorldwide);
+    SteamAPICall_t call = g_requestList(g_mm);
+    if (call == 0) return;
+    g_listInFlight = true;
+    if (g_unregCb) g_unregCb(&g_cbMatchList);
+    g_cbMatchList.arm(cb_LobbyMatchList, sizeof(LobbyMatchList_t));
+    g_regCr(&g_cbMatchList, call, cb_LobbyMatchList);
+}
+
+// A chat line in the lobby we are in (Steam echoes our own lines back too).
+void onLobbyChatMsg(LobbyChatMsg_t* r) {
+    if (!r || !g_getChat || r->m_ulSteamIDLobby != g_lobby || g_lobby == 0) return;
+    if (r->m_eChatEntryType != (unsigned char)k_EChatEntryTypeChatMsg) return;
+    char buf[260];
+    unsigned long long user = 0;
+    int type = 0;
+    int n = g_getChat(g_mm, g_lobby, (int)r->m_iChatID, &user, buf, (int)sizeof(buf) - 1, &type);
+    if (n <= 0) return;
+    if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+    buf[n] = '\0';
+    for (int i = 0; i < n; ++i) if ((unsigned char)buf[i] < 0x20) buf[i] = ' ';
+    chatPush(personaName(user ? user : r->m_ulSteamIDUser), buf);
+    char lb[96];
+    _snprintf(lb, sizeof(lb) - 1, "chat line received (%d bytes, %d kept)", n, g_chatN);
+    lb[sizeof(lb) - 1] = 0;
+    steamLog(lb);
+}
+
 void dispatch(int iCallback, void* param, bool ioFailure) {
     switch (iCallback) {
+        case cb_LobbyMatchList:         onLobbyMatchList((LobbyMatchList_t*)param, ioFailure); break;
+        case cb_LobbyChatMsg:           onLobbyChatMsg((LobbyChatMsg_t*)param); break;
         case cb_LobbyCreated:           onLobbyCreated((LobbyCreated_t*)param, ioFailure); break;
         case cb_LobbyEnter:             onLobbyEnter((LobbyEnter_t*)param); break;
         case cb_GameLobbyJoinRequested: onGameLobbyJoinRequested((GameLobbyJoinRequested_t*)param); break;
@@ -610,6 +765,14 @@ bool init(ConnectFn onConnect) {
     g_getOwner    = (MmGetLobbyOwnerFn)    GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
     g_getNum      = (MmGetNumMembersFn)    GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers");
     g_getMember   = (MmGetMemberByIndexFn) GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex");
+    g_addStrFilter  = (MmAddStrFilterFn)   GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter");
+    g_addDistFilter = (MmAddDistFilterFn)  GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter");
+    g_requestList   = (MmRequestListFn)    GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_RequestLobbyList");
+    g_lobbyByIndex  = (MmLobbyByIndexFn)   GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_GetLobbyByIndex");
+    g_memberLimit   = (MmMemberLimitFn)    GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit");
+    g_setType       = (MmSetTypeFn)        GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_SetLobbyType");
+    g_sendChat      = (MmSendChatFn)       GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_SendLobbyChatMsg");
+    g_getChat       = (MmGetChatFn)        GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_GetLobbyChatEntry");
     g_frCount     = (FrGetCountFn)         GetProcAddress(mod, "SteamAPI_ISteamFriends_GetFriendCount");
     g_frByIndex   = (FrGetByIndexFn)       GetProcAddress(mod, "SteamAPI_ISteamFriends_GetFriendByIndex");
     g_frName      = (FrGetNameFn)          GetProcAddress(mod, "SteamAPI_ISteamFriends_GetFriendPersonaName");
@@ -662,6 +825,16 @@ bool init(ConnectFn onConnect) {
     g_cbRichJoin.arm(cb_GameRichPresenceJoinRequested, sizeof(GameRichPresenceJoinRequested_t));
     g_regCb(&g_cbRichJoin, cb_GameRichPresenceJoinRequested);
     g_regCb(&g_cbP2PRequest, cb_P2PSessionRequest);
+    g_cbChatMsg.arm(cb_LobbyChatMsg, sizeof(LobbyChatMsg_t));
+    g_regCb(&g_cbChatMsg, cb_LobbyChatMsg);
+    {
+        char pb[160];
+        _snprintf(pb, sizeof(pb) - 1, "public games: list=%d setType=%d chat=%d",
+                  (g_requestList && g_lobbyByIndex) ? 1 : 0, g_setType ? 1 : 0,
+                  (g_sendChat && g_getChat) ? 1 : 0);
+        pb[sizeof(pb) - 1] = '\0';
+        steamLog(pb);
+    }
 
     if (getUtIf) {
         static const char* const utVers[] = { "SteamUtils009", "SteamUtils008", "SteamUtils007", "SteamUtils010" };
@@ -876,6 +1049,30 @@ void tick() {
         }
     }
 
+    // Public game list while the window is browsing (not in a lobby): every 5 s.
+    if (g_browse && g_lobby == 0) {
+        unsigned int nowL = GetTickCount();
+        if (g_lastListMs == 0 || nowL - g_lastListMs >= 5000) {
+            g_lastListMs = nowL;
+            requestPublicList();
+        }
+    }
+    // Host: apply the public / friends-only choice to the lobby.
+    if (g_weAreHost && g_lobby != 0 && g_setType && g_typePublished != (g_wantPublic ? 1 : 0)) {
+        g_typePublished = g_wantPublic ? 1 : 0;
+        const bool ok = g_setType(g_mm, g_lobby,
+                                  g_wantPublic ? k_ELobbyTypePublic : k_ELobbyTypeFriendsOnly);
+        char tb[96];
+        _snprintf(tb, sizeof(tb) - 1, "lobby type -> %s ok=%d",
+                  g_wantPublic ? "PUBLIC" : "friends only", ok ? 1 : 0);
+        tb[sizeof(tb) - 1] = '\0';
+        steamLog(tb);
+        if (g_wantPublic)
+            setStatus("Open to everyone - anyone with this build can join");
+        else
+            setStatus("Open to friends - invite them below, or they join from MULTIPLAYER > JOIN");
+    }
+
     // Host: publish readiness on the lobby (joins connect only once it is "1"),
     // and log every membership change with names.
     if (g_weAreHost && g_lobby != 0 && g_setData && g_readyPublished != (g_hostReady ? 1 : 0)) {
@@ -952,6 +1149,65 @@ void tick() {
 
 const char* status() { return g_status; }
 
+// ---- Public games + chat (public API) ------------------------------------------
+bool publicSupported() { return g_ready && g_setType != 0 && g_requestList != 0 && g_lobbyByIndex != 0; }
+void setPublic(bool on) {
+    if (on == g_wantPublic) return;
+    g_wantPublic = on;
+    steamLog(on ? "host chose: PUBLIC game" : "host chose: friends only");
+}
+bool isPublic() { return g_wantPublic; }
+void browse(bool on) {
+    if (on == g_browse) return;
+    g_browse = on;
+    g_lastListMs = 0;
+    if (!on) g_publicN = 0;
+}
+int         publicCount()          { return g_publicN; }
+SteamId     publicLobby(int i)     { return (i >= 0 && i < g_publicN) ? g_public[i].lobby : 0; }
+SteamId     publicOwner(int i)     { return (i >= 0 && i < g_publicN) ? g_public[i].owner : 0; }
+const char* publicName(int i)      { return (i >= 0 && i < g_publicN) ? g_public[i].name : ""; }
+const char* publicVersionText(int i) { return (i >= 0 && i < g_publicN) ? g_public[i].ver : ""; }
+int         publicVersion(int i)   { return (i >= 0 && i < g_publicN) ? g_public[i].version : 0; }
+int         publicMembers(int i)   { return (i >= 0 && i < g_publicN) ? g_public[i].members : 0; }
+int         publicLimit(int i)     { return (i >= 0 && i < g_publicN) ? g_public[i].limit : 0; }
+bool        publicReady(int i)     { return (i >= 0 && i < g_publicN) ? g_public[i].ready : false; }
+
+void joinPublic(SteamId lobby) {
+    if (!g_ready || lobby == 0) return;
+    const PublicRow* p = 0;
+    for (int i = 0; i < g_publicN; ++i) if (g_public[i].lobby == lobby) p = &g_public[i];
+    if (!p) { setStatus("That game is no longer listed"); return; }
+    if (p->version < 0) {
+        setStatus("Different mod version than the host - both install the same release");
+        return;
+    }
+    if (p->limit > 0 && p->members >= p->limit) { setStatus("That game is full"); return; }
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "joining PUBLIC lobby %llu (host %s, %d/%d)", lobby, p->name,
+              p->members, p->limit);
+    b[sizeof(b) - 1] = '\0';
+    steamLog(b);
+    _snprintf(b, sizeof(b) - 1, "Joining %s...", p->name);
+    b[sizeof(b) - 1] = '\0';
+    setStatus(b);
+    enterLobby(lobby);
+}
+
+bool sendChat(const char* text) {
+    if (!g_ready || g_lobby == 0 || !g_sendChat || !text) return false;
+    char buf[201];
+    _snprintf(buf, sizeof(buf) - 1, "%s", text);
+    buf[sizeof(buf) - 1] = '\0';
+    int n = (int)strlen(buf);
+    while (n > 0 && (buf[n - 1] == ' ' || buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
+    if (n == 0) return false;
+    return g_sendChat(g_mm, g_lobby, buf, n + 1);
+}
+int         chatCount()     { return g_chatN; }
+const char* chatLine(int i) { return (i >= 0 && i < g_chatN) ? g_chat[i].text : ""; }
+unsigned    chatSerial()    { return g_chatSerial; }
+
 void reset() {
     if (g_ready && g_lobby != 0 && g_leaveLobby) g_leaveLobby(g_mm, g_lobby);
     if (g_ready && g_weAreHost) clearPresence();
@@ -968,6 +1224,9 @@ void reset() {
     g_lastFriendRefresh = 0;
     g_status[0] = '\0';
     g_invitedN = 0;
+    g_typePublished = -1;
+    g_listInFlight = false;
+    chatClear();
     if (g_ready && g_unregCb) g_unregCb(&g_cbLobbyCreated);
 }
 

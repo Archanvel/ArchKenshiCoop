@@ -172,6 +172,36 @@ const TrPair TR_TABLE[] = {
       "\xD0\xA5\xD0\xBE\xD1\x81\xD1\x82" },
     { "Host a game and invite friends, or join a friend who is hosting.",
       "\xD0\xA1\xD0\xBE\xD0\xB7\xD0\xB4\xD0\xB0\xD0\xB9\xD1\x82\xD0\xB5" " " "\xD0\xB8\xD0\xB3\xD1\x80\xD1\x83" " " "\xD0\xB8" " " "\xD0\xBF\xD1\x80\xD0\xB8\xD0\xB3\xD0\xBB\xD0\xB0\xD1\x81\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xB4\xD1\x80\xD1\x83\xD0\xB7\xD0\xB5\xD0\xB9" " " "\xD0\xB8\xD0\xBB\xD0\xB8" " " "\xD0\xB2\xD0\xBE\xD0\xB9\xD0\xB4\xD0\xB8\xD1\x82\xD0\xB5" " " "\xD0\xBA" " " "\xD0\xB4\xD1\x80\xD1\x83\xD0\xB3\xD1\x83" ", " "\xD0\xBA\xD0\xBE\xD1\x82\xD0\xBE\xD1\x80\xD1\x8B\xD0\xB9" " " "\xD1\x85\xD0\xBE\xD1\x81\xD1\x82\xD0\xB8\xD1\x82" "." },
+    { "OPEN GAMES",
+      "\xD0\x9E" "\xD0\xA2" "\xD0\x9A" "\xD0\xA0" "\xD0\xAB" "\xD0\xA2" "\xD0\xAB" "\xD0\x95" " " "\xD0\x98" "\xD0\x93" "\xD0\xA0" "\xD0\xAB" },
+    { "No open games right now. Host a game: invite friends, or switch PUBLIC on so anyone with this build can join.",
+      "\xD0\xA1" "\xD0\xB5" "\xD0\xB9" "\xD1\x87" "\xD0\xB0" "\xD1\x81" " " "\xD0\xBE" "\xD1\x82" "\xD0\xBA" "\xD1\x80" "\xD1\x8B" "\xD1\x82" "\xD1\x8B" "\xD1\x85" " " "\xD0\xB8" "\xD0\xB3" "\xD1\x80" " " "\xD0\xBD" "\xD0\xB5" "\xD1\x82" ". " "\xD0\xA1" "\xD0\xBE" "\xD0\xB7" "\xD0\xB4" "\xD0\xB0" "\xD0\xB9" "\xD1\x82" "\xD0\xB5" " " "\xD0\xB8" "\xD0\xB3" "\xD1\x80" "\xD1\x83" ": " "\xD0\xBF" "\xD1\x80" "\xD0\xB8" "\xD0\xB3" "\xD0\xBB" "\xD0\xB0" "\xD1\x81" "\xD0\xB8" "\xD1\x82" "\xD0\xB5" " " "\xD0\xB4" "\xD1\x80" "\xD1\x83" "\xD0\xB7" "\xD0\xB5" "\xD0\xB9" " " "\xD0\xB8" "\xD0\xBB" "\xD0\xB8" " " "\xD0\xB2" "\xD0\xBA" "\xD0\xBB" "\xD1\x8E" "\xD1\x87" "\xD0\xB8" "\xD1\x82" "\xD0\xB5" " " "\xD0\x9E" "\xD0\xA2" "\xD0\x9A" "\xD0\xA0" "\xD0\xAB" "\xD0\xA2" "\xD0\xA3" "\xD0\xAE" " " "\xD0\x98" "\xD0\x93" "\xD0\xA0" "\xD0\xA3" ", " "\xD1\x87" "\xD1\x82" "\xD0\xBE" "\xD0\xB1" "\xD1\x8B" " " "\xD0\xB7" "\xD0\xB0" "\xD0\xB9" "\xD1\x82" "\xD0\xB8" " " "\xD0\xBC" "\xD0\xBE" "\xD0\xB3" " " "\xD0\xBB" "\xD1\x8E" "\xD0\xB1" "\xD0\xBE" "\xD0\xB9" " " "\xD1\x81" " " "\xD1\x8D" "\xD1\x82" "\xD0\xBE" "\xD0\xB9" " " "\xD1\x81" "\xD0\xB1" "\xD0\xBE" "\xD1\x80" "\xD0\xBA" "\xD0\xBE" "\xD0\xB9" "." },
+    { "PUBLIC: ON",
+      "\xD0\x9E" "\xD0\xA2" "\xD0\x9A" "\xD0\xA0" "\xD0\xAB" "\xD0\xA2" "\xD0\x90" "\xD0\xAF" ": " "\xD0\x94" "\xD0\x90" },
+    { "PUBLIC: OFF",
+      "\xD0\x9E" "\xD0\xA2" "\xD0\x9A" "\xD0\xA0" "\xD0\xAB" "\xD0\xA2" "\xD0\x90" "\xD0\xAF" ": " "\xD0\x9D" "\xD0\x95" "\xD0\xA2" },
+    { "public game",
+      "\xD0\xBE" "\xD1\x82" "\xD0\xBA" "\xD1\x80" "\xD1\x8B" "\xD1\x82" "\xD0\xB0" "\xD1\x8F" " " "\xD0\xB8" "\xD0\xB3" "\xD1\x80" "\xD0\xB0" },
+    { "players",
+      "\xD0\xB8" "\xD0\xB3" "\xD1\x80" "\xD0\xBE" "\xD0\xBA" "\xD0\xBE" "\xD0\xB2" },
+    { "in game",
+      "\xD0\xB2" " " "\xD0\xB8" "\xD0\xB3" "\xD1\x80" "\xD0\xB5" },
+    { "in lobby",
+      "\xD0\xB2" " " "\xD0\xBB" "\xD0\xBE" "\xD0\xB1" "\xD0\xB1" "\xD0\xB8" },
+    { "FULL",
+      "\xD0\x9C" "\xD0\x95" "\xD0\xA1" "\xD0\xA2" " " "\xD0\x9D" "\xD0\x95" "\xD0\xA2" },
+    { "CHAT",
+      "\xD0\xA7" "\xD0\x90" "\xD0\xA2" },
+    { "SEND",
+      "\xD0\x9E" "\xD0\xA2" "\xD0\x9F" "\xD0\xA0" "\xD0\x90" "\xD0\x92" "\xD0\x98" "\xD0\xA2" "\xD0\xAC" },
+    { "No messages yet. Everyone in this lobby sees what you write here.",
+      "\xD0\xA1" "\xD0\xBE" "\xD0\xBE" "\xD0\xB1" "\xD1\x89" "\xD0\xB5" "\xD0\xBD" "\xD0\xB8" "\xD0\xB9" " " "\xD0\xBF" "\xD0\xBE" "\xD0\xBA" "\xD0\xB0" " " "\xD0\xBD" "\xD0\xB5" "\xD1\x82" ". " "\xD0\x9D" "\xD0\xB0" "\xD0\xBF" "\xD0\xB8" "\xD1\x81" "\xD0\xB0" "\xD0\xBD" "\xD0\xBD" "\xD0\xBE" "\xD0\xB5" " " "\xD0\xB7" "\xD0\xB4" "\xD0\xB5" "\xD1\x81" "\xD1\x8C" " " "\xD0\xB2" "\xD0\xB8" "\xD0\xB4" "\xD1\x8F" "\xD1\x82" " " "\xD0\xB2" "\xD1\x81" "\xD0\xB5" ", " "\xD0\xBA" "\xD1\x82" "\xD0\xBE" " " "\xD0\xB2" " " "\xD1\x8D" "\xD1\x82" "\xD0\xBE" "\xD0\xBC" " " "\xD0\xBB" "\xD0\xBE" "\xD0\xB1" "\xD0\xB1" "\xD0\xB8" "." },
+    { "Open to everyone - anyone with this build can join",
+      "\xD0\x9E" "\xD1\x82" "\xD0\xBA" "\xD1\x80" "\xD1\x8B" "\xD1\x82" "\xD0\xBE" " " "\xD0\xB4" "\xD0\xBB" "\xD1\x8F" " " "\xD0\xB2" "\xD1\x81" "\xD0\xB5" "\xD1\x85" " - " "\xD0\xB7" "\xD0\xB0" "\xD0\xB9" "\xD1\x82" "\xD0\xB8" " " "\xD0\xBC" "\xD0\xBE" "\xD0\xB6" "\xD0\xB5" "\xD1\x82" " " "\xD0\xBB" "\xD1\x8E" "\xD0\xB1" "\xD0\xBE" "\xD0\xB9" " " "\xD1\x81" " " "\xD1\x8D" "\xD1\x82" "\xD0\xBE" "\xD0\xB9" " " "\xD1\x81" "\xD0\xB1" "\xD0\xBE" "\xD1\x80" "\xD0\xBA" "\xD0\xBE" "\xD0\xB9" },
+    { "That game is full",
+      "\xD0\x92" " " "\xD1\x8D" "\xD1\x82" "\xD0\xBE" "\xD0\xB9" " " "\xD0\xB8" "\xD0\xB3" "\xD1\x80" "\xD0\xB5" " " "\xD0\xBD" "\xD0\xB5" "\xD1\x82" " " "\xD0\xBC" "\xD0\xB5" "\xD1\x81" "\xD1\x82" },
+    { "That game is no longer listed",
+      "\xD0\xAD" "\xD1\x82" "\xD0\xBE" "\xD0\xB9" " " "\xD0\xB8" "\xD0\xB3" "\xD1\x80" "\xD1\x8B" " " "\xD1\x83" "\xD0\xB6" "\xD0\xB5" " " "\xD0\xBD" "\xD0\xB5" "\xD1\x82" " " "\xD0\xB2" " " "\xD1\x81" "\xD0\xBF" "\xD0\xB8" "\xD1\x81" "\xD0\xBA" "\xD0\xB5" },
     { 0, 0 }
 };
 bool g_lobbyRu = false;
@@ -243,12 +273,16 @@ struct LobbyUi {
     unsigned       hash;    // fingerprint of what the content shows
     unsigned       joinedSeen;
     bool           joinRunning; // auto-open edge: a join connection came up
+    MyGUI::EditBox* chatEdit;   // lobby chat input (0 when not shown)
+    MyGUI::EditBox* chatView;   // lobby chat lines (0 when not shown)
+    std::string    chatText;    // typed text, kept across rebuilds
+    unsigned       chatSeen;    // chat serial the view shows
     MyGUI::EditBox* ipEdit;     // direct-IP address box (0 when not shown)
     std::string    ipText;      // its text, kept across rebuilds
     bool           ipSeeded;    // ipText was prefilled from the last session
     LobbyUi() : root(0), bg(0), menuBtn(0), win(0), content(0), open(false),
                 view(VIEW_MAIN), page(0), hash(0), joinedSeen(0), joinRunning(false),
-                ipEdit(0), ipSeeded(false) {}
+                chatEdit(0), chatView(0), chatSeen(0), ipEdit(0), ipSeeded(false) {}
 };
 LobbyUi g_ui;
 
@@ -265,6 +299,9 @@ int         g_ngWaitTicks = 0;
 class LobbyUnlinker : public MyGUI::IUnlinkWidget {
 public:
     virtual void _unlinkWidget(MyGUI::Widget* w) {
+        if (w == g_ui.chatEdit) g_ui.chatEdit = 0;
+        if (w == g_ui.chatView) g_ui.chatView = 0;
+        if (w == g_ui.content || w == g_ui.win || w == g_ui.bg) { g_ui.chatEdit = 0; g_ui.chatView = 0; }
         if (w == g_ui.ipEdit)  g_ui.ipEdit = 0;
         if (w == g_ui.content) { g_ui.content = 0; g_ui.ipEdit = 0; g_buttons.clear(); }
         if (w == g_ui.win)     { g_ui.win = 0; g_ui.content = 0; g_ui.ipEdit = 0; g_buttons.clear(); }
@@ -281,6 +318,7 @@ void onActionClick(MyGUI::Widget* w) {
         if (g_buttons[i].w == w) { g_pending = g_buttons[i].action; return; }
 }
 void onMenuClick(MyGUI::Widget*) { g_pending = "open"; }
+void onChatAccept(MyGUI::EditBox*) { g_pending = "chatsend"; } // Enter in the chat box
 
 // Find a widget of one of Kenshi's loaded layouts. Layout widgets are named
 // <prefix><name> with a per-instance prefix and every layout root is
@@ -378,7 +416,8 @@ struct Model {
     std::vector<Btn> left, right;
     bool             direct;   // show the play-by-IP block
     std::string      localIp;
-    Model() : statusCol(0), direct(false) {}
+    bool             chat;     // show the lobby chat block
+    Model() : statusCol(0), direct(false), chat(false) {}
 };
 
 void addBtn(std::vector<Btn>& v, const char* caption, const char* action, bool enabled) {
@@ -448,6 +487,9 @@ void buildModel(const LobbyState* st, const LobbyActions* act, Model& m) {
         }
         addBtn(m.left, "NEW GAME", "newgame", st->lobbyHost);
         addBtn(m.left, "LOAD GAME", "saves", st->lobbyHost);
+        // Open the lobby to everyone running this build, not only friends.
+        if (st->publicOk)
+            addBtn(m.left, st->lobbyPublic ? "PUBLIC: ON" : "PUBLIC: OFF", "public", st->lobbyHost);
     } else if (st->inLobby) {
         m.header = "WAITING FOR THE HOST";
         m.empty  = std::string(tr("You are in ")) + esc(st->hostName && st->hostName[0] ? st->hostName : tr("the host"), 28) +
@@ -463,9 +505,9 @@ void buildModel(const LobbyState* st, const LobbyActions* act, Model& m) {
             addBtn(m.left, "LOAD GAME", "saves", true);
         }
     } else {
-        m.header = "FRIENDS HOSTING";
+        m.header = "OPEN GAMES";
         m.empty  = st->steamUp
-            ? "No friends are hosting right now. Host a game and invite them, or wait for their invite."
+            ? "No open games right now. Host a game: invite friends, or switch PUBLIC on so anyone with this build can join."
             : "Steam is not running - start Steam, or use F2 > Advanced for LAN play.";
         for (int i = 0; i < st->friendCount; ++i) {
             const CoopPanelFriend& f = st->friends[i];
@@ -481,11 +523,42 @@ void buildModel(const LobbyState* st, const LobbyActions* act, Model& m) {
             r.enabled = f.version >= 0;
             m.rows.push_back(r);
         }
+        // Public games of players who are not friends (a friend's public game is
+        // already listed above).
+        for (int i = 0; i < st->publicCount; ++i) {
+            const LobbyPublic& p = st->publics[i];
+            bool dup = false;
+            for (int k = 0; k < st->friendCount; ++k)
+                if (p.owner != 0 && st->friends[k].id == p.owner && st->friends[k].state == 3) dup = true;
+            if (dup) continue;
+            Row r;
+            r.id   = p.owner;
+            r.pic  = p.owner != 0 && avatarReady(p.owner, act);
+            r.name = esc(p.name, 28);
+            char nb2[48];
+            _snprintf(nb2, sizeof(nb2) - 1, "%d/%d ", p.members, p.limit);
+            nb2[sizeof(nb2) - 1] = '\0';
+            const bool full = p.limit > 0 && p.members >= p.limit;
+            if (p.version < 0) {
+                r.sub    = std::string(tr("different mod version - update to the same release")) +
+                           " (v" + esc(p.ver, 24) + ")";
+                r.subCol = COL_RED;
+            } else {
+                r.sub    = std::string(tr("public game")) + " - " + nb2 + tr("players") + " - " +
+                           tr(p.ready ? "in game" : "in lobby") + " - v" + esc(p.ver, 24);
+                r.subCol = COL_GREEN;
+            }
+            r.action  = "joinpub:" + u64str(p.lobby);
+            r.caption = full ? "FULL" : "JOIN";
+            r.enabled = p.version >= 0 && !full;
+            m.rows.push_back(r);
+        }
         addBtn(m.left, "HOST GAME", "host", st->steamUp);
         // Play without Steam: one player hosts, the other types the host's address.
         m.direct  = true;
         m.localIp = st->localIp ? st->localIp : "";
     }
+    m.chat = st->inLobby && g_ui.view != VIEW_SAVES;
     if (st->inLobby || st->running) addBtn(m.right, "LEAVE", "leave", true);
     addBtn(m.right, "CLOSE", "close", true);
 }
@@ -508,6 +581,7 @@ unsigned modelHash(const Model& m, int w, int h) {
     b[sizeof(b) - 1] = '\0';
     x = fnv(x, b); x = fnv(x, m.status); x = fnv(x, m.header); x = fnv(x, m.empty);
     x = fnv(x, m.direct ? "D" : "-"); x = fnv(x, m.localIp);
+    x = fnv(x, m.chat ? "C" : "-");
     for (size_t i = 0; i < m.members.size(); ++i) x = fnvRow(x, m.members[i]);
     for (size_t i = 0; i < m.rows.size(); ++i)    x = fnvRow(x, m.rows[i]);
     for (size_t i = 0; i < m.left.size(); ++i)    { x = fnv(x, m.left[i].caption);  x = fnv(x, m.left[i].enabled ? "e" : "d"); }
@@ -564,9 +638,12 @@ void build(const Model& m) {
     MyGUI::Gui* gui = myGui();
     if (!gui || !g_ui.win) return;
     if (g_ui.ipEdit) g_ui.ipText = g_ui.ipEdit->getOnlyText().asUTF8(); // typed text survives
+    if (g_ui.chatEdit) g_ui.chatText = g_ui.chatEdit->getOnlyText().asUTF8();
     if (g_ui.content) gui->destroyWidget(g_ui.content); // the unlinker clears content + buttons
     g_ui.content = 0;
     g_ui.ipEdit = 0;
+    g_ui.chatEdit = 0;
+    g_ui.chatView = 0;
     g_buttons.clear();
 
     const MyGUI::IntCoord cc = g_ui.win->getClientCoord();
@@ -614,7 +691,8 @@ void build(const Model& m) {
     const int bottomY = H - 54;
     // The play-by-IP block sits between the list and the bottom bar.
     const int DIRECT_H = 96;
-    const int listBottom = m.direct ? bottomY - DIRECT_H : bottomY;
+    const int CHAT_H = 176; // lobby chat: header, six lines, input row
+    const int listBottom = m.direct ? bottomY - DIRECT_H : (m.chat ? bottomY - CHAT_H : bottomY);
     const int rowH = 46;
     int perPage = (listBottom - (y + 32)) / rowH;
     if (perPage < 1) perPage = 1;
@@ -689,6 +767,41 @@ void build(const Model& m) {
             : std::string(tr("Host: press HOST BY IP and tell your friend this address:  ")) + m.localIp;
         addText(c, PAD, by + bh + 4, W - 2 * PAD, 22, mine, SKIN_TEXT, FONT_SMALL, COL_GREY,
                 MyGUI::Align::Left | MyGUI::Align::VCenter);
+    }
+
+    if (m.chat) {
+        const int dy = listBottom;
+        addText(c, PAD, dy, W - 2 * PAD, 26, "CHAT", SKIN_TITLE, FONT_HEAD, COL_BEIGE,
+                MyGUI::Align::Left | MyGUI::Align::VCenter);
+        const int ih = 34, sw = 130;
+        const int vy = dy + 28, vh = CHAT_H - 28 - ih - 10;
+        MyGUI::Widget* card = c->createWidget<MyGUI::Widget>(SKIN_CARD,
+            MyGUI::IntCoord(PAD, vy, W - 2 * PAD, vh), MyGUI::Align::Default);
+        if (card) card->setNeedMouseFocus(false);
+        MyGUI::EditBox* v = c->createWidget<MyGUI::EditBox>("Kenshi_WordWrapEmpty",
+            MyGUI::IntCoord(PAD + 6, vy + 3, W - 2 * PAD - 12, vh - 6), MyGUI::Align::Default);
+        if (v) {
+            v->setEditMultiLine(true);
+            v->setEditWordWrap(true);
+            v->setEditReadOnly(true);
+            v->setEditStatic(true);
+            v->setFontName(FONT_SMALL);
+            v->setTextColour(colour(COL_WHITE));
+            v->setNeedMouseFocus(false);
+            g_ui.chatView = v;
+            g_ui.chatSeen = ~0u; // lobbyTick fills it
+        }
+        const int by = dy + CHAT_H - ih - 4;
+        MyGUI::EditBox* e = c->createWidget<MyGUI::EditBox>("Kenshi_EditBox",
+            MyGUI::IntCoord(PAD, by, W - 2 * PAD - sw - 8, ih), MyGUI::Align::Default);
+        if (e) {
+            e->setFontName(FONT_TEXT);
+            e->setMaxTextLength(180);
+            e->setOnlyText(MyGUI::UString(g_ui.chatText));
+            e->eventEditSelectAccept += MyGUI::newDelegate(&onChatAccept);
+            g_ui.chatEdit = e;
+        }
+        addButton(c, W - PAD - sw, by, sw, ih, "SEND", "chatsend", true);
     }
 
     // Bottom bar: context actions left, LEAVE / CLOSE right.
@@ -809,6 +922,19 @@ void runAction(const std::string& a, const LobbyState* st, const LobbyActions* a
     if (a == "close")     { closeWindow(); return; }
     if (a == "host")      { if (act->host) act->host(); return; }
     if (a == "hostip")    { if (act->hostDirect) act->hostDirect(); return; }
+    if (a == "public")    { if (act->setPublic) act->setPublic(!st->lobbyPublic); return; }
+    if (a == "chatsend") {
+        if (g_ui.chatEdit) g_ui.chatText = g_ui.chatEdit->getOnlyText().asUTF8();
+        if (!g_ui.chatText.empty() && act->sendChat && act->sendChat(g_ui.chatText.c_str())) {
+            g_ui.chatText.clear();
+            if (g_ui.chatEdit) g_ui.chatEdit->setOnlyText(MyGUI::UString(""));
+        }
+        return;
+    }
+    if (a.compare(0, 8, "joinpub:") == 0) {
+        if (act->joinPublic) act->joinPublic(_strtoui64(a.c_str() + 8, 0, 10));
+        return;
+    }
     if (a == "joinip") {
         if (g_ui.ipEdit) g_ui.ipText = g_ui.ipEdit->getOnlyText().asUTF8();
         // trim spaces: a pasted address often carries one
@@ -885,6 +1011,13 @@ void testTick() {
     } else if (t.verb == "confirm") {
         // Kenshi's own New Game character editor (the host's squad): confirm as is.
         if (chargenEditorOpen() && chargenConfirmEditor()) target = (MyGUI::Widget*)1;
+    } else if (t.verb == "chat") {
+        // Type a line into the lobby chat box and send it.
+        if (g_ui.chatEdit) {
+            g_ui.chatEdit->setOnlyText(MyGUI::UString(t.arg));
+            g_pending = "chatsend";
+            target = (MyGUI::Widget*)1;
+        }
     } else if (t.verb == "open") {
         target = g_ui.menuBtn;
         fireClick(target);
@@ -901,6 +1034,7 @@ void testTick() {
         for (size_t i = 0; i < g_buttons.size(); ++i)
             if (g_buttons[i].action == action) { target = g_buttons[i].w; break; }
         if (target) fireClick(target);
+        else if (t.verb == "load" && g_ui.open) { g_pending = action; target = (MyGUI::Widget*)1; } // save on another page
     }
     char b[160];
     if (target) {
@@ -973,6 +1107,20 @@ void lobbyTick(const LobbyState* st, const LobbyActions* act) {
     if (!g_ui.content || h != g_ui.hash) {
         build(m);
         g_ui.hash = h;
+    }
+    // Chat lines are written into the live view, never through a rebuild: a
+    // rebuild would take the keyboard focus from someone typing a reply.
+    if (g_ui.chatView && g_ui.chatSeen != st->chatSerial) {
+        g_ui.chatSeen = st->chatSerial;
+        std::string all;
+        const int first = st->chatCount > 6 ? st->chatCount - 6 : 0;
+        for (int i = first; i < st->chatCount; ++i) {
+            if (!all.empty()) all += "\n";
+            all += esc(st->chat[i], 300);
+        }
+        if (all.empty())
+            all = tr("No messages yet. Everyone in this lobby sees what you write here.");
+        g_ui.chatView->setCaption(MyGUI::UString(all));
     }
 }
 

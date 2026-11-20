@@ -91,6 +91,7 @@ static int coopInvOwnerClass(const unsigned int h[5]) {
 // combat-hit report rides on that detour, and startNetworking re-latches it per
 // role, so it needs to know the hook is really there.
 static bool g_dmgHookOk = false;
+static bool g_chatHintRu = false; // in-game chat hint language (game runs in Russian)
 static bool g_floaterShare = false; // protocol 68 damage-number sharing (addWound detour)
 
 static bool vendorRefreshGate(unsigned int platContainer, unsigned int platSerial) {
@@ -1497,7 +1498,36 @@ void lobbyDrive(const std::vector<coop::engine::CoopPanelFriend>& friends, const
     std::string hostName;
     if (si::inLobby() && !si::lobbyHost()) { si::nameOf(si::lobbyOwner(), nb, sizeof(nb)); hostName = nb; }
 
+    // Public games (listed only while we are not in a lobby) and lobby chat.
+    std::vector<std::string> pubNames, pubVers;
+    for (int i = 0; i < si::publicCount(); ++i) {
+        pubNames.push_back(si::publicName(i));
+        pubVers.push_back(si::publicVersionText(i));
+    }
+    std::vector<coop::engine::LobbyPublic> publics;
+    for (int i = 0; i < si::publicCount(); ++i) {
+        coop::engine::LobbyPublic p;
+        p.lobby   = si::publicLobby(i);
+        p.owner   = si::publicOwner(i);
+        p.name    = pubNames[i].c_str();
+        p.ver     = pubVers[i].c_str();
+        p.version = si::publicVersion(i);
+        p.members = si::publicMembers(i);
+        p.limit   = si::publicLimit(i);
+        p.ready   = si::publicReady(i);
+        publics.push_back(p);
+    }
+    std::vector<const char*> chat;
+    for (int i = 0; i < si::chatCount(); ++i) chat.push_back(si::chatLine(i));
+
     coop::engine::LobbyState ls;
+    ls.publicOk     = si::publicSupported();
+    ls.lobbyPublic  = si::isPublic();
+    ls.publics      = publics.empty() ? 0 : &publics[0];
+    ls.publicCount  = (int)publics.size();
+    ls.chat         = chat.empty() ? 0 : &chat[0];
+    ls.chatCount    = (int)chat.size();
+    ls.chatSerial   = si::chatSerial();
     ls.steamUp      = si::ready();
     ls.inLobby      = si::inLobby();
     ls.lobbyHost    = si::lobbyHost();
@@ -1532,6 +1562,9 @@ void lobbyDrive(const std::vector<coop::engine::CoopPanelFriend>& friends, const
     la.invite   = &si::inviteFriend;
     la.join     = &si::joinFriend;
     la.leave    = &coopUiDisconnect;
+    la.setPublic  = &si::setPublic;
+    la.joinPublic = &si::joinPublic;
+    la.sendChat   = &si::sendChat;
     la.hostDirect = &lobbyHostDirect;
     la.joinDirect = &lobbyJoinDirect;
     la.loadSave = &lobbyLoadSave;
@@ -1556,6 +1589,7 @@ void coopPanelDrive(bool atTitle) {
     // the friend list fresh only while the panel or lobby window shows it.
     coop::steaminvite::watchFriends(coop::engine::coopPanelIsOpen() ||
                                     (atTitle && coop::engine::lobbyIsOpen()));
+    coop::steaminvite::browse(atTitle && coop::engine::lobbyIsOpen());
     coop::steaminvite::tick();
     // Friends waiting in the host's lobby are let in only once the host's world
     // is live - never at the menu or during character creation.
@@ -1663,6 +1697,22 @@ void coopPanelDrive(bool atTitle) {
     act.join       = &coop::steaminvite::joinFriend;
 
     coop::engine::coopPanelTick(&ps, &act);
+
+    {   // In-game lobby chat (the lobby window's own chat covers the title screen).
+        static std::vector<const char*> s_chatLines;
+        s_chatLines.clear();
+        for (int i = 0; i < coop::steaminvite::chatCount(); ++i)
+            s_chatLines.push_back(coop::steaminvite::chatLine(i));
+        coop::engine::ChatOverlayState cs;
+        cs.active = !atTitle && coop::steaminvite::inLobby() && g_gameStarted && g_lastGw != 0;
+        cs.lines  = s_chatLines.empty() ? 0 : &s_chatLines[0];
+        cs.count  = (int)s_chatLines.size();
+        cs.serial = coop::steaminvite::chatSerial();
+        cs.hint   = g_chatHintRu ? "\xD0\xA7" "\xD0\xB0" "\xD1\x82" ": " "\xD0\xBD" "\xD0\xB0" "\xD0\xB6" "\xD0\xBC" "\xD0\xB8" "\xD1\x82" "\xD0\xB5" " ENTER, " "\xD1\x87" "\xD1\x82" "\xD0\xBE" "\xD0\xB1" "\xD1\x8B" " " "\xD0\xBD" "\xD0\xB0" "\xD0\xBF" "\xD0\xB8" "\xD1\x81" "\xD0\xB0" "\xD1\x82" "\xD1\x8C" " " "\xD0\xB4" "\xD1\x80" "\xD1\x83" "\xD0\xB3" "\xD0\xB8" "\xD0\xBC" " " "\xD0\xB8" "\xD0\xB3" "\xD1\x80" "\xD0\xBE" "\xD0\xBA" "\xD0\xB0" "\xD0\xBC"
+                                 : "Chat: press ENTER to write to the other players";
+        cs.send   = &coop::steaminvite::sendChat;
+        coop::engine::chatOverlayTick(&cs);
+    }
     // Top-left status banner: hidden for now (to be reworked); KENSHICOOP_BANNER=1
     // shows it again for debugging. Session status stays in the lobby + F2 panel.
     static int s_banner = -1;
@@ -3372,6 +3422,7 @@ void configureReplicator() {
             }
             g_repl.setUiRussian(ru);
             coop::engine::lobbySetRussian(ru);
+            g_chatHintRu = ru;
             coop::logLine(ru ? "[coop-ui] language: ru" : "[coop-ui] language: en");
         }
         g_repl.setAuditRows(g_cfg.scenario == "travel_parity" ||

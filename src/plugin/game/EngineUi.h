@@ -95,8 +95,25 @@ struct LobbySave {
     const char* display;  // UTF-8 for the list
     const char* when;     // "2026-10-17 22:58"
 };
+// A public game found through Steam's lobby list (not necessarily a friend's).
+struct LobbyPublic {
+    unsigned long long lobby;    // pass to LobbyActions::joinPublic
+    unsigned long long owner;    // host's SteamID (0 = unknown) - avatar
+    const char*        name;     // host's Steam name, UTF-8
+    const char*        ver;      // host's mod version text
+    int                version;  // 1 same protocol, -1 different, 0 unknown
+    int                members, limit;
+    bool               ready;    // host's world is running
+};
 struct LobbyState {
     bool               steamUp;      // Steam lobby layer ready
+    bool               publicOk;     // this Steam build can list / open public games
+    bool               lobbyPublic;  // host's choice: open to everyone
+    const LobbyPublic* publics;      // public games (only while not in a lobby)
+    int                publicCount;
+    const char* const* chat;         // lobby chat lines "name: text", oldest first
+    int                chatCount;
+    unsigned           chatSerial;   // bumped on every chat change
     bool               inLobby;      // in a Steam lobby (host or join)
     bool               lobbyHost;    // ... and we own it
     bool               opening;      // lobby creation in flight
@@ -122,6 +139,9 @@ struct LobbyActions {
     void (*invite)(unsigned long long friendId);
     void (*join)(unsigned long long friendId);
     void (*leave)();                                  // leave the lobby / session
+    void (*setPublic)(bool on);                       // host: open the lobby to everyone
+    void (*joinPublic)(unsigned long long lobby);     // join a listed public game
+    bool (*sendChat)(const char* utf8);               // say something in the lobby
     void (*hostDirect)();                             // host without Steam (direct IP)
     void (*joinDirect)(const char* ip);               // join a host by IP address
     bool (*loadSave)(const char* name);               // host: load for everyone
@@ -142,6 +162,20 @@ void lobbyTestTick();
 // when the tab appeared; after renaming a squad, retitle its tab too. False when
 // no tab carries oldName (e.g. the bar is not built yet).
 bool renameSquadTabCaption(const std::string& oldName, const std::string& newName);
+
+// ---- In-game lobby chat overlay ---------------------------------------------
+// While a game is running and we are in a Steam lobby: the last chat lines show
+// at the top-left for a few seconds after somebody writes, and ENTER opens a
+// one-line input (ENTER sends, ESC or an empty line closes). Main thread only.
+struct ChatOverlayState {
+    bool               active;  // in a lobby with a world loaded
+    const char* const* lines;   // "name: text", oldest first
+    int                count;
+    unsigned           serial;  // bumped on every chat change
+    const char*        hint;    // shown while there are no lines yet (UTF-8)
+    bool             (*send)(const char* utf8);
+};
+void chatOverlayTick(const ChatOverlayState* st);
 
 // Persistent co-op connection-status banner: a single screen-space label fixed 10
 // px in from the top-left corner (a createFloatingLabel MyGUI::Window on the

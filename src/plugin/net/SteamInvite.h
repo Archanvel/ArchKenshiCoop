@@ -110,6 +110,31 @@ bool        invited(SteamId id);
 // invite, Join button, launch argument) - the menu opens the lobby window then.
 unsigned    joinedSerial();
 
+// ---- Public games ------------------------------------------------------------
+// The host may open its lobby to EVERYONE running the same build (not only Steam
+// friends); the MULTIPLAYER window lists such lobbies through Steam's own lobby
+// search. No server of ours is involved.
+bool        publicSupported();      // this Steam API build has list + set-type
+void        setPublic(bool on);     // host's choice; applied to the live lobby
+bool        isPublic();
+void        browse(bool on);        // keep the public list fresh (window open)
+int         publicCount();
+SteamId     publicLobby(int i);     // lobby id (pass to joinPublic)
+SteamId     publicOwner(int i);     // host's SteamID (0 = unknown)
+const char* publicName(int i);      // host's Steam name
+const char* publicVersionText(int i);
+int         publicVersion(int i);   // 1 same protocol, -1 different, 0 unknown
+int         publicMembers(int i);
+int         publicLimit(int i);
+bool        publicReady(int i);     // host's world is running
+void        joinPublic(SteamId lobby);
+
+// ---- Lobby text chat (everyone in the lobby we are in) -----------------------
+bool        sendChat(const char* utf8);
+int         chatCount();
+const char* chatLine(int i);        // "name: text", oldest first
+unsigned    chatSerial();           // bumped on every change
+
 // Leave any lobby and clear invite state (called on disconnect / teardown).
 void reset();
 

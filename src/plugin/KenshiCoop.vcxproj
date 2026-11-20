@@ -132,6 +132,7 @@
     <ClCompile Include="game\EngineEntity.cpp" />
     <ClCompile Include="game\EngineUi.cpp" />
     <ClCompile Include="game\EngineLobby.cpp" />
+    <ClCompile Include="game\EngineChat.cpp" />
     <ClCompile Include="game\EngineCharGen.cpp" />
     <ClCompile Include="game\EngineInventory.cpp" />
     <ClCompile Include="game\EngineSpawnCombat.cpp" />

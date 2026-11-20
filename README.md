@@ -17,7 +17,7 @@ v0.59.1 (который продолжает [nhoral/KenshiCoop](https://github.
 разбирали по логам обоих игроков и чинили. Всё, что можно проверить
 автоматически, прогоняется на стенде из двух копий игры.
 
-Текущая версия: **0.59.1-fix21**, сетевой протокол **70**.
+Текущая версия: **0.59.1-fix22**, сетевой протокол **70**.
 
 > **Важно:** у всех игроков должна стоять одна и та же сборка. С оригинальной
 > v0.59.1 и с версией из Мастерской Steam она не соединится.
@@ -26,7 +26,7 @@ v0.59.1 (который продолжает [nhoral/KenshiCoop](https://github.
 
 Нужны Kenshi 1.0.65 (Steam) и [RE_Kenshi 0.3.1+](https://www.nexusmods.com/kenshi/mods/847).
 
-1. Скачай `KenshiCoop-fix21.zip` со страницы
+1. Скачай `KenshiCoop-fix22.zip` со страницы
    [релизов](https://github.com/Archanvel/ArchKenshiCoop/releases/latest).
 2. Распакуй. Внутри одна папка `KenshiCoop` — положи её в `mods` игры, чтобы
    получилось `<Kenshi>\mods\KenshiCoop\KenshiCoop.dll`
@@ -59,6 +59,9 @@ v0.59.1 (который продолжает [nhoral/KenshiCoop](https://github.
 - **Фракции.** Вступление во фракцию засчитывается обоим игрокам.
 - **Удобства.** Игра по IP прямо из окна Multiplayer, русский интерфейс мода,
   сообщение «торговец занят».
+- **Открытые игры и чат.** Хост может открыть игру для всех, у кого стоит эта
+  сборка, — не только для друзей из Steam. В лобби и в самой игре есть текстовый
+  чат (Enter — написать).
 - **Вылеты и зависания.** Хост не падает при подборе проданной вещи, загрузка
   мира не зависает в меню.
 
@@ -95,9 +98,9 @@ All credit for the mod goes to its authors. We play it as a pair, write down
 what breaks, trace each report through both players' logs and fix it; whatever
 can be checked automatically runs on a two-client test harness.
 
-- Current version **0.59.1-fix21**, wire protocol **70**. Every player needs
+- Current version **0.59.1-fix22**, wire protocol **70**. Every player needs
   this exact build; it does not connect to stock v0.59.1 or the Workshop version.
-- Install: download `KenshiCoop-fix21.zip` from
+- Install: download `KenshiCoop-fix22.zip` from
   [Releases](https://github.com/Archanvel/ArchKenshiCoop/releases/latest), put
   the `KenshiCoop` folder into `<Kenshi>\mods\`, enable the mod, use
   **MULTIPLAYER** in the main menu. Requires Kenshi 1.0.65 and RE_Kenshi 0.3.1+.
@@ -106,6 +109,9 @@ can be checked automatically runs on a two-client test harness.
   knock-out timers, corpse positions, NPCs under ground or jittering at beds
   and machines, a host crash and a stuck world transfer. Details per version
   in [CHANGELOG.md](CHANGELOG.md).
+- New in fix22: public games (a host can open the lobby to anyone running this
+  build; the MULTIPLAYER window lists them) and text chat, in the lobby and in
+  game (press Enter).
 - New `coop_config.json` keys: `speedPolicy`, `speedCombatCap`,
   `pauseWhileJoining`, `healMult`, `bedHealMult`.
 
